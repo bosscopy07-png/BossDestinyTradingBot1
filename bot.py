@@ -500,4 +500,4 @@ def main_menu():
     kb = types.InlineKeyboardMarkup()
     kb.row(
         types.InlineKeyboardButton("📈 Get Signal", callback_data="get_signal"),
-        types.InlineKeyboardButton("📊 My Challenge", callback_dat
+        types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status")
