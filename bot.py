@@ -511,5 +511,3 @@ kb.row(
     types.InlineKeyboardButton("🧾 History", callback_data="history")
 )
 return kb
-        types.InlineKeyboardButton("📈 Get Signal", callback_data="get_signal"),
-        types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status")
