@@ -510,3 +510,8 @@ def main_menu():
         types.InlineKeyboardButton("🧾 History", callback_data="history")
     )
     return kb
+# all your bot commands, handlers, and functions above this point
+
+if __name__ == "__main__":
+    print("🤖 Boss Destiny Trading Bot is running...")
+    bot.polling(none_stop=True)
