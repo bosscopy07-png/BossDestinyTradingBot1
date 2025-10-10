@@ -499,5 +499,17 @@ def link_handler(message):
 def main_menu():
     kb = types.InlineKeyboardMarkup()
     kb.row(
+    types.InlineKeyboardButton("📈 Get Signal", callback_data="get_signal"),
+    types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status")
+)
+kb.row(
+    types.InlineKeyboardButton("📸 Send Chart (image)", callback_data="send_chart_info"),
+    types.InlineKeyboardButton("📁 PnL Upload", callback_data="pnl_upload")
+)
+kb.row(
+    types.InlineKeyboardButton("💬 Ask AI", callback_data="ask_ai"),
+    types.InlineKeyboardButton("🧾 History", callback_data="history")
+)
+return kb
         types.InlineKeyboardButton("📈 Get Signal", callback_data="get_signal"),
         types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status")
