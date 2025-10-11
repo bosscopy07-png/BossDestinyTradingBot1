@@ -158,44 +158,239 @@ def send_logo_with_optional_chart(chat_id, text, reply_markup=None, chart_bytes=
         log_exc(e)
     bot.send_message(chat_id, text, reply_markup=reply_markup, reply_to_message_id=reply_to)
 
-# ---------- Binance klines fetcher with retries ----------
-def fetch_klines_df(symbol="BTCUSDT", interval="1h", limit=300):
+# ---------- Binance klines fetcher with retries ---------
+# ---------- REPLACEMENT: Robust Binance fetcher + improved signal logic ----------
+import math
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# create a session with retries (one global session for bot)
+_session = None
+def get_requests_session():
+    global _session
+    if _session is None:
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "BossDestinyBot/1.0 (+https://t.me/yourbot)"
+        })
+        # configure urllib3 retries for connection-level errors
+        retries = Retry(total=5, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET","POST"])
+        adapter = HTTPAdapter(max_retries=retries)
+        s.mount("https://", adapter)
+        s.mount("http://", adapter)
+        _session = s
+    return _session
+
+def fetch_klines_df(symbol="BTCUSDT", interval="1h", limit=200, max_attempts=4):
     """
-    Returns DataFrame of klines from Binance.
-    Retries up to 3 times on network errors or HTTP errors.
+    More robust fetch:
+      - normalizes interval
+      - uses session + user-agent
+      - exponential backoff
+      - returns DataFrame or raises RuntimeError with HTTP status (so logs show exact cause)
     """
     interval = normalize_interval(interval)
-    params = {"symbol": symbol.upper(), "interval": interval, "limit": limit}
-    tries = 0
-    while tries < 3:
-        try:
-            r = requests.get(BINANCE_KLINES, params=params, timeout=10)
-            r.raise_for_status()
-            raw = r.json()
-            cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
-            df = pd.DataFrame(raw, columns=cols)
-            for c in ["open","high","low","close","volume"]:
-                df[c] = df[c].astype(float)
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-            return df
-        except requests.HTTPError as http_e:
-            tries += 1
-            print(f"fetch_klines HTTP error {http_e} attempt {tries} for {symbol} {interval}")
-            time.sleep(1 + tries)
-        except Exception as e:
-            tries += 1
-            print(f"fetch_klines error {e} attempt {tries} for {symbol} {interval}")
-            time.sleep(1 + tries)
-    raise RuntimeError(f"Failed to fetch klines for {symbol} {interval} after retries")
+    symbol = symbol.upper()
+    limit = int(limit) if limit else 200
+    url = BINANCE_KLINES
+    params = {"symbol": symbol, "interval": interval, "limit": limit}
+    session = get_requests_session()
 
-def fetch_ticker_24h(symbol="BTCUSDT"):
+    attempt = 0
+    while attempt < max_attempts:
+        try:
+            resp = session.get(url, params=params, timeout=10)
+            # if the status is 200, parse and return
+            if resp.status_code == 200:
+                data = resp.json()
+                cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
+                df = pd.DataFrame(data, columns=cols)
+                for c in ["open","high","low","close","volume"]:
+                    df[c] = df[c].astype(float)
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+                return df
+            # For 4xx/5xx produce a clear error
+            # 429 = rate limit, 418/451 = blocked/tos, 403 = forbidden
+            status = resp.status_code
+            text = resp.text[:400]
+            # handle 429 specifically by backing off longer
+            if status == 429:
+                wait = 2 ** attempt + 1
+                print(f"Binance 429 rate limit for {symbol}/{interval}. Backoff {wait}s. Resp: {text[:200]}")
+                time.sleep(wait)
+                attempt += 1
+                continue
+            if status in (418, 451, 403):
+                # likely blocked or legal restriction => do NOT retry heavily
+                raise RuntimeError(f"Binance HTTP {status} ({resp.reason}) for {symbol} {interval} — response snippet: {text}")
+            # for other 5xx, retry with backoff
+            if 500 <= status < 600:
+                wait = 2 ** attempt
+                print(f"Binance server error {status} for {symbol}/{interval}. Backoff {wait}s.")
+                time.sleep(wait)
+                attempt += 1
+                continue
+            # for other client errors raise immediately
+            raise RuntimeError(f"Binance HTTP {status} for {symbol} {interval} — {resp.reason} - {text}")
+        except requests.RequestException as e:
+            # network error -> backoff and retry
+            wait = 2 ** attempt + 1
+            print(f"Network error fetching klines {symbol}/{interval}: {e}. Backoff {wait}s.")
+            time.sleep(wait)
+            attempt += 1
+    raise RuntimeError(f"Failed to fetch klines for {symbol} {interval} after {max_attempts} attempts")
+
+# ---------- ATR helper ----------
+def compute_atr(df, period=14):
+    """
+    Average True Range (ATR) for volatility-based SL/TP.
+    """
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period, min_periods=1).mean()
+    return atr
+
+# ---------- improved signal (multi-timeframe confirmation + ATR) ----------
+def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
+    """
+    Multi-timeframe: check base_interval (1h) and a higher timeframe (4h).
+    Rules:
+      - Primary signal from base timeframe EMA crossover + wick checks + MACD/Rsi
+      - Confirm that the higher timeframe isn't strongly against the base signal (optional)
+      - Compute ATR and use it to set SL/TP (sl = recent swing or ATR*1.5)
+      - Filter out signals if ATR is very large relative to price (too volatile) or volume very low
+      - Return: signal, entry, sl, tp1, tp2, confidence, reasons, suggested_risk_usd, suggested_pos_units
+    """
     try:
-        r = requests.get(BINANCE_TICKER_24H, params={"symbol": symbol.upper()}, timeout=8)
-        r.raise_for_status()
-        return r.json()
+        base_tf = normalize_interval(base_interval)
+        higher_tf = "4h"  # confirmation timeframe
+        # fetch both timeframes (reduce limit to 150/100 to be lighter)
+        df_base = fetch_klines_df(symbol, interval=base_tf, limit=200)
+        df_high = fetch_klines_df(symbol, interval=higher_tf, limit=150)
+
+        # compute indicators
+        df_base["ema_fast"] = ema(df_base["close"], EMA_FAST)
+        df_base["ema_slow"] = ema(df_base["close"], EMA_SLOW)
+        df_base["rsi"] = rsi(df_base["close"], RSI_PERIOD)
+        mc, msig, mhist = macd(df_base["close"])
+        df_base["macd_hist"] = mhist
+        atr_series = compute_atr(df_base, period=14)
+        atr = float(atr_series.iloc[-1]) if len(atr_series)>0 else 0.0
+
+        last = df_base.iloc[-1]; prev = df_base.iloc[-2]
+
+        signal = None; reasons=[]; score=0.0
+
+        # EMA cross detection
+        if (prev["ema_fast"] <= prev["ema_slow"]) and (last["ema_fast"] > last["ema_slow"]):
+            signal = "BUY"; reasons.append("EMA cross up"); score += 0.28
+        if (prev["ema_fast"] >= prev["ema_slow"]) and (last["ema_fast"] < last["ema_slow"]):
+            signal = "SELL"; reasons.append("EMA cross down"); score += 0.28
+
+        # MACD
+        if last["macd_hist"] > 0:
+            reasons.append("MACD hist positive"); score += 0.10
+        else:
+            score -= 0.03
+
+        # wick rejection (body and wicks)
+        body = abs(last["close"] - last["open"])
+        upper_wick = last["high"] - max(last["close"], last["open"])
+        lower_wick = min(last["close"], last["open"]) - last["low"]
+        if body > 0:
+            ur = upper_wick / body
+            lr = lower_wick / body
+            if ur > 2 and upper_wick > lower_wick:
+                reasons.append("Upper wick rejection"); score -= 0.12
+                if not signal: signal = "SELL"
+            if lr > 2 and lower_wick > upper_wick:
+                reasons.append("Lower wick rejection"); score -= 0.12
+                if not signal: signal = "BUY"
+
+        # RSI filter
+        r = float(df_base["rsi"].iloc[-1])
+        if signal=="BUY" and r>78:
+            reasons.append(f"High RSI {r:.1f}"); score -= 0.14
+        if signal=="SELL" and r<22:
+            reasons.append(f"Low RSI {r:.1f}"); score -= 0.14
+
+        # higher timeframe confirmation: if higher_tf trend strongly opposite, reduce score heavily
+        try:
+            df_high["ema_fast"] = ema(df_high["close"], EMA_FAST)
+            df_high["ema_slow"] = ema(df_high["close"], EMA_SLOW)
+            last_h = df_high.iloc[-1]; prev_h = df_high.iloc[-2]
+            if (last_h["ema_fast"] > last_h["ema_slow"]) and signal=="SELL":
+                reasons.append("4h trend contradicts (bullish)"); score -= 0.25
+            if (last_h["ema_fast"] < last_h["ema_slow"]) and signal=="BUY":
+                reasons.append("4h trend contradicts (bearish)"); score -= 0.25
+            # if both timeframes align, boost confidence
+            if ((last_h["ema_fast"] > last_h["ema_slow"]) and signal=="BUY") or ((last_h["ema_fast"] < last_h["ema_slow"]) and signal=="SELL"):
+                score += 0.12
+        except Exception:
+            # ignore high-tf confirmation errors
+            pass
+
+        # volume check
+        vol = float(df_base["volume"].iloc[-1])
+        if MIN_VOLUME and vol < MIN_VOLUME:
+            reasons.append("Low volume"); score -= 0.08
+
+        # volatility / ATR sanity: if ATR > price*0.02 (2%) then market is too volatile to trade small account
+        price = float(last["close"])
+        if atr > price * 0.03:
+            reasons.append(f"High ATR {atr:.6f} relative to price -> avoid"); score -= 0.30
+
+        confidence = max(0.05, min(0.98, 0.5 + score))
+        # compute SL using ATR or recent swing
+        if signal == "BUY":
+            swing_sl = float(df_base["low"].iloc[-3])
+            sl_by_atr = price - (atr * 1.5) if atr>0 else swing_sl
+            sl = max(swing_sl, sl_by_atr)
+            tp1 = price + (price - sl) * 1.5
+            tp2 = price + (price - sl) * 3
+        elif signal == "SELL":
+            swing_sl = float(df_base["high"].iloc[-3])
+            sl_by_atr = price + (atr * 1.5) if atr>0 else swing_sl
+            sl = min(swing_sl, sl_by_atr)
+            tp1 = price - (sl - price) * 1.5
+            tp2 = price - (sl - price) * 3
+        else:
+            sl = price * 0.995
+            tp1 = price * 1.005
+            tp2 = price * 1.01
+
+        # suggested risk (USD) and suggested position units (approx) based on current balance
+        d = load_data()
+        balance = d.get("challenge", {}).get("balance", CHALLENGE_START)
+        suggested_risk_usd = round((balance * RISK_PERCENT) / 100.0, 8)
+        # approximate unit size in quote currency units: risk_usd / |entry - sl|
+        diff = abs(price - sl) if abs(price - sl) > 1e-12 else 1e-12
+        suggested_units = round(suggested_risk_usd / diff, 8)
+
+        return {
+            "symbol": symbol.upper(),
+            "interval": base_tf,
+            "signal": signal or "HOLD",
+            "entry": round(price, 8),
+            "sl": round(sl, 8),
+            "tp1": round(tp1, 8),
+            "tp2": round(tp2, 8),
+            "atr": round(atr, 8),
+            "rsi": round(r, 2),
+            "volume": vol,
+            "reasons": reasons,
+            "confidence": round(confidence, 2),
+            "suggested_risk_usd": suggested_risk_usd,
+            "suggested_units": suggested_units
+        }
     except Exception as e:
-        print("fetch_ticker_24h error", e)
-        return
+        log_exc(e)
+        return {"error": str(e)}
 
 # ---------- indicators ----------
 def ema(series, period):
