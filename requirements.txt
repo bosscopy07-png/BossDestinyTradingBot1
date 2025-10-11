@@ -4,3 +4,6 @@ pandas
 numpy
 pillow
 openai
+matplotlib
+ccxt
+python-binance
