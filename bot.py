@@ -195,7 +195,7 @@ def fetch_ticker_24h(symbol="BTCUSDT"):
         return r.json()
     except Exception as e:
         print("fetch_ticker_24h error", e)
-        return {}
+        return
 
 # ---------- indicators ----------
 def ema(series, period):
@@ -222,133 +222,7 @@ def macd(series, fast=12, slow=26, signal=9):
 def generate_candlestick_image(df, symbol):
     """
     Returns PNG bytes for a candlestick image of last ~60 candles, or None if plotting unavailable.
-    """
-    if not MATPLOTLIB_AVAILABLE:
-        return None
-    try:
-        dfp = df.copy().tail(60)
-        dates = mdates.date2num(dfp["open_time"].dt.to_pydatetime())
-        o = dfp["open"].values; h = dfp["high"].values; l = dfp["low"].values; c = dfp["close"].values
-
-        fig, ax = plt.subplots(figsize=(8,4), dpi=100)
-        width = (dates[1]-dates[0]) * 0.6 if len(dates) > 1 else 0.0005
-
-        for i in range(len(dates)):
-            color = "green" if c[i] >= o[i] else "red"
-            ax.plot([dates[i], dates[i]], [l[i], h[i]], color=color, linewidth=0.8)
-            rect = plt.Rectangle((dates[i]-width/2, min(o[i], c[i])), width, abs(c[i]-o[i]), color=color)
-            ax.add_patch(rect)
-
-        ax.xaxis_date()
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M\n%d-%b'))
-        ax.set_title(symbol + " — last " + str(len(dfp)) + " candles")
-        ax.grid(alpha=0.2)
-        plt.tight_layout()
-        buf = BytesIO()
-        plt.savefig(buf, format="png")
-        plt.close(fig)
-        buf.seek(0)
-        return buf.read()
-    except Exception as e:
-        print("generate_candlestick_image error", e)
-        return None
-
-# End of PART 1 of 4
-# Paste Part 2 next (signal engine, risk sizing, record/send logic).
-# ---------- bot.py (PART 2 of 4) ----------
-# Signal engine, risk sizing, scanner, AI wrapper
-
-# ---------- signal generator ----------
-def generate_signal_from_df(df, symbol, interval_label="1h"):
-    """
-    Create a signal object from a OHLCV DataFrame.
-    """
-    try:
-        if df is None or len(df) < 30:
-            return {"error": "Not enough data to generate signal"}
-        df2 = df.copy()
-        df2["ema_fast"] = ema(df2["close"], EMA_FAST)
-        df2["ema_slow"] = ema(df2["close"], EMA_SLOW)
-        df2["rsi"] = rsi(df2["close"], RSI_PERIOD)
-        mc, msig, mhist = macd(df2["close"])
-        df2["macd_line"], df2["macd_signal"], df2["macd_hist"] = mc, msig, mhist
-
-        last = df2.iloc[-1]; prev = df2.iloc[-2]
-        signal = None; reasons = []; score = 0.0
-
-        # EMA crossover
-        if (prev["ema_fast"] <= prev["ema_slow"]) and (last["ema_fast"] > last["ema_slow"]):
-            signal = "BUY"; reasons.append("EMA cross up"); score += 0.30
-        if (prev["ema_fast"] >= prev["ema_slow"]) and (last["ema_fast"] < last["ema_slow"]):
-            signal = "SELL"; reasons.append("EMA cross down"); score += 0.30
-
-        # MACD histogram direction
-        if last["macd_hist"] > 0:
-            score += 0.12; reasons.append("MACD positive")
-        else:
-            score -= 0.03
-
-        # wick rejection
-        body = abs(last["close"] - last["open"])
-        upper_wick = last["high"] - max(last["close"], last["open"])
-        lower_wick = min(last["close"], last["open"]) - last["low"]
-        if body > 0:
-            upper_ratio = upper_wick / body
-            lower_ratio = lower_wick / body
-        else:
-            upper_ratio = lower_ratio = 0
-        if upper_ratio > 2 and upper_wick > lower_wick:
-            reasons.append("Upper wick rejection"); score -= 0.12
-            if not signal: signal = "SELL"
-        if lower_ratio > 2 and lower_wick > upper_wick:
-            reasons.append("Lower wick rejection"); score -= 0.12
-            if not signal: signal = "BUY"
-
-        # RSI sanity
-        r = last["rsi"]
-        if signal == "BUY" and r > 78:
-            reasons.append(f"RSI high {r:.1f}"); score -= 0.15
-        if signal == "SELL" and r < 22:
-            reasons.append(f"RSI low {r:.1f}"); score -= 0.15
-
-        # volume filter
-        vol = float(last.get("volume", 0.0))
-        if MIN_VOLUME and vol < MIN_VOLUME:
-            reasons.append("Low volume"); score -= 0.05
-
-        confidence = max(0.05, min(0.95, 0.5 + score))
-        price = float(last["close"])
-
-        if signal == "BUY":
-            sl = float(df2["low"].iloc[-3])
-            tp1 = price + (price - sl) * 1.5
-            tp2 = price + (price - sl) * 3
-        elif signal == "SELL":
-            sl = float(df2["high"].iloc[-3])
-            tp1 = price - (sl - price) * 1.5
-            tp2 = price - (sl - price) * 3
-        else:
-            sl = price * 0.995
-            tp1 = price * 1.005
-            tp2 = price * 1.01
-
-        return {
-            "symbol": symbol.upper(),
-            "interval": interval_label,
-            "time": datetime.utcnow().isoformat(),
-            "signal": signal or "HOLD",
-            "entry": nice(price),
-            "sl": nice(sl),
-            "tp1": nice(tp1),
-            "tp2": nice(tp2),
-            "rsi": round(float(r),2),
-            "volume": vol,
-            "reasons": reasons,
-            "confidence": round(confidence,2)
-        }
-    except Exception as e:
-        log_exc(e)
-        return {"error": str(e)}
+    ""
 
 # ---------- risk sizing ----------
 def compute_risk_and_size(entry, sl, balance, risk_percent):
