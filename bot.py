@@ -1,10 +1,9 @@
 # ---------- bot.py (PART 1 of 4) ----------
-# BossDestiny Trading Bot v3 — Part 1: setup, keep-alive, config, storage, utils
+# Boss Destiny Trading Empire — Final Pro Bot (Part 1: setup & utils)
 
 import os
-import sys
-import json
 import time
+import json
 import math
 import threading
 import traceback
@@ -14,12 +13,13 @@ from io import BytesIO
 import requests
 import pandas as pd
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
+# Telegram
 import telebot
 from telebot import types
 
-# optional plotting
+# Optional plotting
 MATPLOTLIB_AVAILABLE = False
 try:
     import matplotlib
@@ -30,54 +30,56 @@ try:
 except Exception:
     MATPLOTLIB_AVAILABLE = False
 
-# Flask keep-alive
+# Flask keepalive (optional for Render web service)
 from flask import Flask
 app = Flask(__name__)
-
 @app.route("/")
 def index():
-    return "Boss Destiny Trading Bot v3 — Alive"
+    return "Boss Destiny Trading Empire — Alive"
 
 def run_keepalive(host="0.0.0.0", port=8080):
     try:
         app.run(host=host, port=int(port))
     except Exception as e:
-        print("Keepalive server failed:", e)
+        print("Keepalive failed:", e)
 
-# ---------- CONFIG (env vars) ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-CHANNEL_ID = os.getenv("CHANNEL_ID") or None
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")  # required for AI features
-LOGO_PATH = os.getenv("LOGO_PATH", "bd_logo.png")
+# ----------------- Configuration (env vars) -----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # must be set in env
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))   # your numeric Telegram id
+CHANNEL_ID = os.getenv("CHANNEL_ID", "") or None
 
 # Trading defaults
-DEFAULT_INTERVAL = os.getenv("SIGNAL_INTERVAL", "1h")  # default 1h as requested
+DEFAULT_INTERVAL = os.getenv("SIGNAL_INTERVAL", "1h")
 PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,ADAUSDT,SOLUSDT").split(",")
 EMA_FAST = int(os.getenv("EMA_FAST", "9"))
 EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
 RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "5"))  # percent of balance risked per trade
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "5"))  # percent per trade
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "0"))
 SIGNAL_COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
 CHALLENGE_START = float(os.getenv("CHALLENGE_START", "10"))
 CHALLENGE_TARGET = float(os.getenv("CHALLENGE_TARGET", "100"))
-MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE", "20"))   # maximum allowed recommended leverage
+MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE", "20"))
 
 DATA_FILE = os.getenv("DATA_FILE", "data.json")
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
 LOG_DIR = os.getenv("LOG_DIR", "logs")
+LOGO_TEXT = os.getenv("LOGO_TEXT", "Boss Destiny Trading Empire")
 
-# ---------- sanity checks ----------
+# sanity
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN env var is required.")
+    raise RuntimeError("Missing BOT_TOKEN env var. Set it in your host.")
 if ADMIN_ID == 0:
-    raise RuntimeError("ADMIN_ID env var is required (your numeric Telegram id).")
+    print("Warning: ADMIN_ID not set or 0. Set ADMIN_ID to your Telegram numeric id for admin controls.")
 
-# ---------- initialize bot ----------
+# initialize bot
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# ---------- storage init ----------
+# ----------------- storage & logging -----------------
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 def atomic_write(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -85,10 +87,8 @@ def atomic_write(path, obj):
     os.replace(tmp, path)
 
 def init_storage():
-    os.makedirs(LOG_DIR, exist_ok=True)
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
     if not os.path.exists(DATA_FILE):
-        d = {
+        obj = {
             "signals": [],
             "pnl": [],
             "challenge": {"balance": CHALLENGE_START, "wins":0, "losses":0, "history":[]},
@@ -97,7 +97,7 @@ def init_storage():
             "auto_scan": False,
             "users": []
         }
-        atomic_write(DATA_FILE, d)
+        atomic_write(DATA_FILE, obj)
 
 def load_data():
     init_storage()
@@ -107,12 +107,8 @@ def load_data():
 def save_data(d):
     atomic_write(DATA_FILE, d)
 
-init_storage()
-
-# ---------- logging helper ----------
-def log_exc(e=None):
-    s = f"[{datetime.utcnow().isoformat()}] ERROR: {e}\n"
-    s += traceback.format_exc()
+def log_exc(e):
+    s = f"[{datetime.utcnow().isoformat()}] ERROR: {e}\n" + traceback.format_exc()
     try:
         with open(os.path.join(LOG_DIR, "error_log.txt"), "a") as lf:
             lf.write(s + "\n")
@@ -129,173 +125,152 @@ def log_info(msg):
         pass
     print(s)
 
-# ---------- utilities ----------
+# ----------------- small helpers -----------------
 def nice(x, nd=8):
     try:
         return float(round(x, nd))
     except:
         return x
 
-def send_logo_with_optional_chart(chat_id, text, reply_markup=None, chart_bytes=None, reply_to=None):
+def now_iso():
+    return datetime.utcnow().isoformat()
+
+# Create a small branded image (PIL) with text to attach to messages (works without network)
+def create_brand_image(text=LOGO_TEXT, size=(800,120), font_size=36):
     try:
-        if os.path.exists(LOGO_PATH):
-            with open(LOGO_PATH, "rb") as logo_f:
-                bot.send_photo(chat_id, logo_f, caption=text, reply_markup=reply_markup, reply_to_message_id=reply_to)
-                if chart_bytes:
-                    bio = BytesIO(chart_bytes); bio.seek(0)
-                    bot.send_photo(chat_id, bio)
-                return
+        img = Image.new("RGBA", size, (255,255,255,255))
+        draw = ImageDraw.Draw(img)
+        # use default font if a TTF not available
+        try:
+            # Try to use a common font; it may not exist on all hosts — fallback below
+            font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except Exception:
+            font = ImageFont.load_default()
+        w,h = draw.textsize(text, font=font)
+        x = (size[0]-w)//2
+        y = (size[1]-h)//2
+        draw.text((x,y), text, fill=(0,0,0), font=font)
+        buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+        return buf.read()
     except Exception as e:
         log_exc(e)
-    # fallback
-    if chart_bytes:
-        bot.send_message(chat_id, text, reply_markup=reply_markup)
-        bio = BytesIO(chart_bytes); bio.seek(0)
-        bot.send_photo(chat_id, bio)
-        return
-    bot.send_message(chat_id, text, reply_markup=reply_markup)
+        return None
+
+# Pre-generate brand image bytes for quick sending
+BRAND_IMAGE_BYTES = create_brand_image()
 
 # End of PART 1
-# Paste PART 2 next.
 # ---------- bot.py (PART 2 of 4) ----------
-# Multi-source fetcher + indicators + plotting helper
+# Data fetchers + indicators + optional matplotlib charts
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Endpoints
+# endpoints
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-BYBIT_KLINES = "https://api.bybit.com/public/linear/kline"  # bybit public kline endpoint for linear contracts
+BYBIT_KLINES = "https://api.bybit.com/public/linear/kline"
 COINGECKO_MARKET_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
+COINGECKO_MAP = {"BTCUSDT":"bitcoin","ETHUSDT":"ethereum","BNBUSDT":"binancecoin","ADAUSDT":"cardano","SOLUSDT":"solana"}
 
-COINGECKO_MAP = {
-    "BTCUSDT": "bitcoin",
-    "ETHUSDT": "ethereum",
-    "BNBUSDT": "binancecoin",
-    "ADAUSDT": "cardano",
-    "SOLUSDT": "solana"
-}
-
-# Shared requests session with retries
+# session with retries
 _session = None
 def get_session():
     global _session
     if _session is None:
         s = requests.Session()
-        s.headers.update({"User-Agent": "BossDestinyBot/1.0 (+https://t.me/yourbot)"})
+        s.headers.update({"User-Agent":"BossDestinyBot/1.0 (+https://t.me/yourbot)"})
         retries = Retry(total=5, backoff_factor=0.6, status_forcelist=[429,500,502,503,504], allowed_methods=["GET"])
-        adapter = HTTPAdapter(max_retries=retries)
-        s.mount("https://", adapter)
-        s.mount("http://", adapter)
+        s.mount("https://", HTTPAdapter(max_retries=retries))
+        s.mount("http://", HTTPAdapter(max_retries=retries))
         _session = s
     return _session
 
-# Normalize interval
-VALID_INTERVALS = {"1m":"1m","3m":"3m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","2h":"2h","4h":"4h","6h":"6h","12h":"12h","1d":"1d"}
 def normalize_interval(s):
     if not s: return DEFAULT_INTERVAL
     s2 = s.strip().lower()
     s2 = s2.replace("hours","h").replace("hour","h").replace("hrs","h").replace("mins","m").replace("min","m")
-    if s2 in VALID_INTERVALS: return VALID_INTERVALS[s2]
-    if s2.endswith(("m","h","d")): return s2
+    if s2 in {"1m","3m","5m","15m","30m","1h","2h","4h","6h","12h","1d"}:
+        return s2
+    if s2.endswith(("m","h","d")):
+        return s2
     return DEFAULT_INTERVAL
 
-# ---------- Binance kline fetcher ----------
 def fetch_klines_binance(symbol="BTCUSDT", interval="1h", limit=200):
-    session = get_session()
     params = {"symbol": symbol.upper(), "interval": normalize_interval(interval), "limit": int(limit)}
-    try:
-        r = session.get(BINANCE_KLINES, params=params, timeout=10)
-        if r.status_code != 200:
-            raise RuntimeError(f"Binance HTTP {r.status_code}: {r.text[:300]}")
-        raw = r.json()
-        cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
-        df = pd.DataFrame(raw, columns=cols)
-        for c in ["open","high","low","close","volume"]:
-            df[c] = df[c].astype(float)
-        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-        return df
-    except Exception as e:
-        raise RuntimeError(f"Binance fetch failed: {e}")
+    r = get_session().get(BINANCE_KLINES, params=params, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Binance HTTP {r.status_code} - {r.text[:300]}")
+    raw = r.json()
+    cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
+    df = pd.DataFrame(raw, columns=cols)
+    for c in ["open","high","low","close","volume"]:
+        df[c] = df[c].astype(float)
+    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+    return df
 
-# ---------- Bybit kline fetcher (linear public) ----------
 def fetch_klines_bybit(symbol="BTCUSDT", interval="1h", limit=200):
-    session = get_session()
-    # Bybit expects symbol like BTCUSDT and interval e.g. 60
-    tf_map = {"1m": "1", "3m":"3","5m":"5","15m":"15","30m":"30","1h":"60","2h":"120","4h":"240","1d":"D"}
+    # Bybit uses intervals like 60 for 1h, etc.
+    tf_map = {"1m":"1","3m":"3","5m":"5","15m":"15","30m":"30","1h":"60","2h":"120","4h":"240","1d":"D"}
     tf = tf_map.get(normalize_interval(interval), "60")
     params = {"symbol": symbol.upper(), "interval": tf, "limit": int(limit)}
-    try:
-        r = session.get(BYBIT_KLINES, params=params, timeout=10)
-        if r.status_code != 200:
-            raise RuntimeError(f"Bybit HTTP {r.status_code}: {r.text[:300]}")
-        js = r.json()
-        data = js.get("result") or js
-        # Bybit returns list of dicts with 'open_time','open','high','low','close','volume'
-        if isinstance(data, dict) and "data" in data:
-            arr = data["data"]
-        elif isinstance(data, list):
-            arr = data
-        else:
-            arr = data.get("list", [])
-        # convert to DataFrame; best-effort mapping
-        df = pd.DataFrame(arr)
-        # ensure names
-        if "open_time" in df.columns:
-            df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
-        elif "start_at" in df.columns:
-            df["open_time"] = pd.to_datetime(df["start_at"], unit="s")
-        for c in ["open","high","low","close","volume"]:
-            if c in df.columns:
-                df[c] = df[c].astype(float)
-        # ensure columns exist
-        df = df[["open_time","open","high","low","close","volume"]]
-        return df
-    except Exception as e:
-        raise RuntimeError(f"Bybit fetch failed: {e}")
+    r = get_session().get(BYBIT_KLINES, params=params, timeout=10)
+    if r.status_code != 200:
+        raise RuntimeError(f"Bybit HTTP {r.status_code} - {r.text[:300]}")
+    js = r.json()
+    data = js.get("result") or js
+    # Convert to dataframe, best-effort mapping
+    if isinstance(data, dict) and "list" in data:
+        arr = data["list"]
+    elif isinstance(data, list):
+        arr = data
+    elif isinstance(data, dict) and "data" in data:
+        arr = data["data"]
+    else:
+        arr = []
+    df = pd.DataFrame(arr)
+    if "open_time" in df.columns:
+        df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
+    elif "start_at" in df.columns:
+        df["open_time"] = pd.to_datetime(df["start_at"], unit="s")
+    for c in ["open","high","low","close","volume"]:
+        if c in df.columns:
+            df[c] = df[c].astype(float)
+    df = df[["open_time","open","high","low","close","volume"]]
+    return df
 
-# ---------- CoinGecko fallback (approx price series) ----------
 def fetch_klines_coingecko(symbol="BTCUSDT", interval="1h", limit=200):
     coin = COINGECKO_MAP.get(symbol.upper())
     if not coin:
-        raise RuntimeError("CoinGecko fallback doesn't know symbol: " + symbol)
+        raise RuntimeError("CoinGecko fallback not supported for symbol: " + symbol)
     days = 7 if normalize_interval(interval).endswith("h") else 30
-    try:
-        url = COINGECKO_MARKET_CHART.format(id=coin)
-        r = get_session().get(url, params={"vs_currency":"usd","days": days}, timeout=10)
-        r.raise_for_status()
-        j = r.json()
-        prices = j.get("prices", [])[-limit:]
-        rows = []
-        for p in prices:
-            ts = int(p[0]); price = float(p[1])
-            rows.append([pd.to_datetime(ts, unit="ms"), price, price, price, price, 0.0])
-        df = pd.DataFrame(rows, columns=["open_time","open","high","low","close","volume"])
-        return df
-    except Exception as e:
-        raise RuntimeError(f"CoinGecko fetch failed: {e}")
+    r = get_session().get(COINGECKO_MARKET_CHART.format(id=coin), params={"vs_currency":"usd","days":days}, timeout=10)
+    r.raise_for_status()
+    j = r.json()
+    prices = j.get("prices", [])[-limit:]
+    rows = []
+    for p in prices:
+        ts = int(p[0]); price = float(p[1])
+        rows.append([pd.to_datetime(ts, unit="ms"), price, price, price, price, 0.0])
+    df = pd.DataFrame(rows, columns=["open_time","open","high","low","close","volume"])
+    return df
 
-# ---------- unified fetcher with fallback ----------
 def fetch_klines_df(symbol="BTCUSDT", interval="1h", limit=200):
     errors = []
     try:
         return fetch_klines_binance(symbol, interval, limit)
     except Exception as e:
-        errors.append(str(e))
-        log_info(f"Binance failed for {symbol}/{interval}: {e}")
+        errors.append(str(e)); log_info(f"Binance error for {symbol}/{interval}: {e}")
     try:
         return fetch_klines_bybit(symbol, interval, limit)
     except Exception as e:
-        errors.append(str(e))
-        log_info(f"Bybit failed for {symbol}/{interval}: {e}")
+        errors.append(str(e)); log_info(f"Bybit error for {symbol}/{interval}: {e}")
     try:
         return fetch_klines_coingecko(symbol, interval, limit)
     except Exception as e:
-        errors.append(str(e))
-        log_info(f"CoinGecko failed for {symbol}/{interval}: {e}")
+        errors.append(str(e)); log_info(f"CoinGecko error for {symbol}/{interval}: {e}")
     raise RuntimeError("All providers failed: " + " | ".join(errors))
 
-# ---------- Indicators ----------
+# ---------- indicators ----------
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -325,12 +300,12 @@ def compute_atr(df, period=14):
     atr = tr.rolling(period, min_periods=1).mean()
     return atr
 
-# ---------- chart generator ----------
-def generate_candlestick_image(df, symbol):
+# ---------- optional chart generation ----------
+def generate_candlestick_image(df, symbol, candles=80):
     if not MATPLOTLIB_AVAILABLE:
         return None
     try:
-        dfp = df.copy().tail(80)
+        dfp = df.copy().tail(candles)
         dates = mdates.date2num(dfp["open_time"].dt.to_pydatetime())
         o = dfp["open"].values; h = dfp["high"].values; l = dfp["low"].values; c = dfp["close"].values
         fig, ax = plt.subplots(figsize=(10,4), dpi=100)
@@ -352,41 +327,25 @@ def generate_candlestick_image(df, symbol):
         log_exc(e)
         return None
 
-# End of PART 2
-# Paste PART 3 next.
+# End PART 2
 # ---------- bot.py (PART 3 of 4) ----------
-# Signal generator (multi-timeframe) + leverage suggestion + recording & top4
+# Signal engine + risk sizing + recording + scan top4
 
 def suggest_leverage(confidence, price, atr, base_max_leverage=MAX_LEVERAGE):
-    """
-    Suggest leverage based on confidence, volatility (ATR), and max limit.
-    - confidence: 0.0-1.0
-    - higher volatility (atr/price) => lower leverage
-    """
     try:
         vol_ratio = (atr / price) if price > 0 else 0
-        # base leverage proportional to confidence
         base = max(1.0, confidence * base_max_leverage)
-        # reduce leverage for high volatility
-        if vol_ratio > 0.03:  # >3% ATR relative to price => risky
-            base = base * 0.3
+        if vol_ratio > 0.03:
+            base *= 0.3
         elif vol_ratio > 0.015:
-            base = base * 0.6
-        # clamp
+            base *= 0.6
         lev = int(max(1, min(base_max_leverage, round(base))))
         return lev
     except Exception as e:
         log_exc(e)
         return 1
 
-def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
-    """
-    Multi-timeframe signal:
-      - primary TF = base_interval
-      - confirm with 4h
-      - SL/TP via ATR or swing
-      - returns suggested leverage & suggested risk USD/units
-    """
+def generate_signal_for(symbol="BTCUSDT", base_interval="1h"):
     try:
         base_tf = normalize_interval(base_interval)
         high_tf = "4h"
@@ -398,32 +357,29 @@ def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
             df_high = None
 
         if df is None or len(df) < 30:
-            return {"error": "Not enough data"}
+            return {"error": "insufficient data"}
 
         df["ema_fast"] = ema(df["close"], EMA_FAST)
         df["ema_slow"] = ema(df["close"], EMA_SLOW)
         df["rsi"] = rsi(df["close"], RSI_PERIOD)
-        mc, msig, mhist = macd(df["close"])
-        df["macd_hist"] = mhist
-        atr_s = compute_atr(df, period=14)
-        atr = float(atr_s.iloc[-1]) if len(atr_s) else 0.0
+        mc, msig, mh = macd(df["close"])
+        df["macd_hist"] = mh
+        atr_s = compute_atr(df, 14)
+        atr = float(atr_s.iloc[-1]) if len(atr_s)>0 else 0.0
 
         last = df.iloc[-1]; prev = df.iloc[-2]
-        signal = None; reasons = []; score = 0.0
+        signal = None; reasons=[]; score=0.0
 
-        # EMA cross
         if (prev["ema_fast"] <= prev["ema_slow"]) and (last["ema_fast"] > last["ema_slow"]):
             signal = "BUY"; reasons.append("EMA cross up"); score += 0.28
         if (prev["ema_fast"] >= prev["ema_slow"]) and (last["ema_fast"] < last["ema_slow"]):
             signal = "SELL"; reasons.append("EMA cross down"); score += 0.28
 
-        # MACD
         if last["macd_hist"] > 0:
             reasons.append("MACD positive"); score += 0.10
         else:
             score -= 0.03
 
-        # wick rejection
         body = abs(last["close"] - last["open"])
         upper_wick = last["high"] - max(last["close"], last["open"])
         lower_wick = min(last["close"], last["open"]) - last["low"]
@@ -436,46 +392,42 @@ def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
                 reasons.append("Lower wick rejection"); score -= 0.12
                 if not signal: signal = "BUY"
 
-        # RSI sanity
         r = float(df["rsi"].iloc[-1])
-        if signal == "BUY" and r > 78:
+        if signal=="BUY" and r>78:
             reasons.append(f"High RSI {r:.1f}"); score -= 0.14
-        if signal == "SELL" and r < 22:
+        if signal=="SELL" and r<22:
             reasons.append(f"Low RSI {r:.1f}"); score -= 0.14
 
-        # 4h confirmation
         try:
             if df_high is not None and len(df_high) >= 10:
                 df_high["ema_fast"] = ema(df_high["close"], EMA_FAST)
                 df_high["ema_slow"] = ema(df_high["close"], EMA_SLOW)
                 last_h = df_high.iloc[-1]
-                if signal == "BUY" and last_h["ema_fast"] < last_h["ema_slow"]:
+                if signal=="BUY" and last_h["ema_fast"] < last_h["ema_slow"]:
                     reasons.append("4h contradicts"); score -= 0.25
-                if signal == "SELL" and last_h["ema_fast"] > last_h["ema_slow"]:
+                if signal=="SELL" and last_h["ema_fast"] > last_h["ema_slow"]:
                     reasons.append("4h contradicts"); score -= 0.25
                 if ((last_h["ema_fast"] > last_h["ema_slow"]) and signal=="BUY") or ((last_h["ema_fast"] < last_h["ema_slow"]) and signal=="SELL"):
                     score += 0.12
         except Exception:
             pass
 
-        vol = float(last.get("volume", 0.0))
+        vol = float(last.get("volume",0.0))
         if MIN_VOLUME and vol < MIN_VOLUME:
             reasons.append("Low volume"); score -= 0.08
-
         price = float(last["close"])
         if atr > price * 0.03:
-            reasons.append("High ATR -> volatile"); score -= 0.3
+            reasons.append("High ATR - volatile"); score -= 0.30
 
         confidence = max(0.05, min(0.98, 0.5 + score))
 
-        # SL/TP
-        if signal == "BUY":
+        if signal=="BUY":
             swing_sl = float(df["low"].iloc[-3])
             sl_by_atr = price - (atr * 1.5) if atr>0 else swing_sl
             sl = max(swing_sl, sl_by_atr)
             tp1 = price + (price - sl) * 1.5
             tp2 = price + (price - sl) * 3
-        elif signal == "SELL":
+        elif signal=="SELL":
             swing_sl = float(df["high"].iloc[-3])
             sl_by_atr = price + (atr * 1.5) if atr>0 else swing_sl
             sl = min(swing_sl, sl_by_atr)
@@ -484,10 +436,7 @@ def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
         else:
             sl = price * 0.995; tp1 = price * 1.005; tp2 = price * 1.01
 
-        # suggested leverage based on confidence & volatility
         suggested_leverage = suggest_leverage(confidence, price, atr, base_max_leverage=MAX_LEVERAGE)
-
-        # suggested risk & units
         d = load_data()
         balance = d.get("challenge", {}).get("balance", CHALLENGE_START)
         suggested_risk_usd = round((balance * RISK_PERCENT) / 100.0, 8)
@@ -497,17 +446,17 @@ def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
         return {
             "symbol": symbol.upper(),
             "interval": base_tf,
-            "time": datetime.utcnow().isoformat(),
+            "time": now_iso(),
             "signal": signal or "HOLD",
-            "entry": round(price, 8),
-            "sl": round(sl, 8),
-            "tp1": round(tp1, 8),
-            "tp2": round(tp2, 8),
-            "atr": round(atr, 8),
-            "rsi": round(r, 2),
+            "entry": round(price,8),
+            "sl": round(sl,8),
+            "tp1": round(tp1,8),
+            "tp2": round(tp2,8),
+            "atr": round(atr,8),
+            "rsi": round(r,2),
             "volume": vol,
             "reasons": reasons,
-            "confidence": round(confidence, 2),
+            "confidence": round(confidence,2),
             "suggested_risk_usd": suggested_risk_usd,
             "suggested_units": suggested_units,
             "suggested_leverage": int(suggested_leverage)
@@ -516,21 +465,7 @@ def generate_signal_improved(symbol="BTCUSDT", base_interval="1h"):
         log_exc(e)
         return {"error": str(e)}
 
-# ---------- risk sizing (for display) ----------
-def compute_risk_and_size_display(entry, sl, balance, risk_percent):
-    try:
-        risk_amount = (balance * risk_percent) / 100.0
-        diff = abs(entry - sl)
-        if diff <= 1e-12:
-            pos_size = 0.0
-        else:
-            pos_size = risk_amount / diff
-        return round(risk_amount, 8), round(float(pos_size), 8)
-    except Exception as e:
-        log_exc(e)
-        return 0.0, 0.0
-
-# ---------- record & send ----------
+# recording & sending
 last_signal_time = {}
 def can_send_signal(symbol):
     last = last_signal_time.get(symbol.upper())
@@ -538,50 +473,68 @@ def can_send_signal(symbol):
     return (datetime.utcnow() - last) > timedelta(minutes=SIGNAL_COOLDOWN_MIN)
 
 def record_and_send(sig_obj, chat_id=None, user_id=None):
-    d = load_data()
-    sig_id = f"S{int(time.time())}"
-    balance = d["challenge"].get("balance", CHALLENGE_START)
-    risk_amt, pos_size = compute_risk_and_size_display(sig_obj["entry"], sig_obj["sl"], balance, RISK_PERCENT)
-    rec = {"id": sig_id, "signal": sig_obj, "time": datetime.utcnow().isoformat(), "risk_amt": risk_amt, "pos_size": pos_size, "user": user_id or ADMIN_ID, "result": None}
-    d["signals"].append(rec)
-    d["stats"]["total_signals"] = d["stats"].get("total_signals", 0) + 1
-    save_data(d)
-    last_signal_time[sig_obj["symbol"]] = datetime.utcnow()
-
     try:
-        df = fetch_klines_df(sig_obj["symbol"], interval=sig_obj["interval"], limit=120)
-        chart = generate_candlestick_image(df, sig_obj["symbol"]) if MATPLOTLIB_AVAILABLE else None
-    except Exception:
+        d = load_data()
+        sig_id = f"S{int(time.time())}"
+        balance = d["challenge"].get("balance", CHALLENGE_START)
+        risk_amt = round((balance * RISK_PERCENT) / 100.0, 8)
+        pos_units = sig_obj.get("suggested_units", 0)
+        rec = {"id": sig_id, "signal": sig_obj, "time": now_iso(), "risk_amt": risk_amt, "pos_size": pos_units, "user": user_id or ADMIN_ID, "result": None}
+        d["signals"].append(rec)
+        d["stats"]["total_signals"] = d["stats"].get("total_signals",0) + 1
+        save_data(d)
+        last_signal_time[sig_obj["symbol"]] = datetime.utcnow()
+
         chart = None
+        try:
+            df = fetch_klines_df(sig_obj["symbol"], interval=sig_obj["interval"], limit=120)
+            chart = generate_candlestick_image(df, sig_obj["symbol"]) if MATPLOTLIB_AVAILABLE else None
+        except Exception:
+            chart = None
 
-    stats = d.get("stats", {}); wins = stats.get("wins",0); total = stats.get("total_signals",0)
-    accuracy = (wins / total * 100) if total else 0.0
+        stats = d.get("stats", {}); wins = stats.get("wins",0); total = stats.get("total_signals",0)
+        accuracy = (wins / total * 100) if total else 0.0
 
-    text = (f"🔥 <b>Boss Destiny Signal</b> 🔥\nID: {sig_id}\nPair: {sig_obj['symbol']} | TF: {sig_obj['interval']}\n"
-            f"Signal: <b>{sig_obj['signal']}</b>\nEntry: {sig_obj['entry']}\nSL: {sig_obj['sl']}\nTP1: {sig_obj['tp1']} | TP2: {sig_obj['tp2']}\n\n"
-            f"💰 Risk per trade: ${risk_amt:.4f} ({RISK_PERCENT}% of ${balance:.2f})\n"
-            f"📈 Pos size (units): {pos_size}\n"
-            f"⚙️ Suggested leverage: {sig_obj.get('suggested_leverage',1)}x\n"
-            f"🎯 Confidence: {int(sig_obj['confidence']*100)}% | Accuracy: {accuracy:.1f}%\n"
-            f"Reasons: {', '.join(sig_obj['reasons']) if sig_obj['reasons'] else 'None'}")
+        text = (f"🔥 <b>Boss Destiny Signal</b> 🔥\nID: {sig_id}\nPair: {sig_obj['symbol']} | TF: {sig_obj['interval']}\nSignal: <b>{sig_obj['signal']}</b>\n"
+                f"Entry: {sig_obj['entry']} SL: {sig_obj['sl']}\nTP1: {sig_obj['tp1']} TP2: {sig_obj['tp2']}\n\n"
+                f"💰 Risk per trade: ${risk_amt:.4f} ({RISK_PERCENT}% of ${balance:.2f})\n"
+                f"📈 Pos size (units): {pos_units}\n⚙️ Suggested leverage: {sig_obj.get('suggested_leverage',1)}x\n"
+                f"🎯 Confidence: {int(sig_obj['confidence']*100)}% | Accuracy: {accuracy:.1f}%\nReasons: {', '.join(sig_obj['reasons']) if sig_obj['reasons'] else 'None'}")
 
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("📤 Post (Admin)", callback_data=f"post_{sig_id}"),
-           types.InlineKeyboardButton("📸 Link PnL", callback_data=f"link_pnl_{sig_id}"))
-    kb.add(types.InlineKeyboardButton("🤖 AI Analysis", callback_data=f"ai_sig_{sig_id}"),
-           types.InlineKeyboardButton("📊 Add to Watchlist", callback_data=f"add_watch_{sig_id}"))
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(types.InlineKeyboardButton("📤 Post (Admin)", callback_data=f"post_{sig_id}"),
+               types.InlineKeyboardButton("📸 Link PnL", callback_data=f"link_pnl_{sig_id}"))
+        kb.add(types.InlineKeyboardButton("🤖 AI Analysis", callback_data=f"ai_sig_{sig_id}"),
+               types.InlineKeyboardButton("📊 Add to Watchlist", callback_data=f"add_watch_{sig_id}"))
 
-    target = chat_id or (CHANNEL_ID if CHANNEL_ID else ADMIN_ID)
-    send_logo_with_optional_chart(target, text, reply_markup=kb, chart_bytes=chart)
-    return sig_id
+        target = chat_id or (CHANNEL_ID if CHANNEL_ID else (user_id or ADMIN_ID))
+        # send brand image first (if available) then message and optional chart
+        if BRAND_IMAGE_BYTES:
+            try:
+                bot.send_photo(target, BytesIO(BRAND_IMAGE_BYTES), caption=text, reply_markup=kb)
+                if chart:
+                    bot.send_photo(target, BytesIO(chart))
+            except Exception:
+                # fallback: plain message
+                bot.send_message(target, text, reply_markup=kb)
+                if chart:
+                    bot.send_photo(target, BytesIO(chart))
+        else:
+            bot.send_message(target, text, reply_markup=kb)
+            if chart:
+                bot.send_photo(target, BytesIO(chart))
+        return sig_id
+    except Exception as e:
+        log_exc(e)
+        return None
 
-# ---------- scanner / top4 ----------
+# scanner + top4
 def scan_and_get_top4(pairs=None, interval=DEFAULT_INTERVAL):
     pairs = pairs or PAIRS
     picks = []
     for p in pairs:
         try:
-            sig = generate_signal_improved(p, base_interval=interval)
+            sig = generate_signal_for(p, base_interval=interval)
             if sig and not sig.get("error") and sig.get("signal") in ("BUY","SELL"):
                 picks.append(sig)
         except Exception as e:
@@ -589,22 +542,33 @@ def scan_and_get_top4(pairs=None, interval=DEFAULT_INTERVAL):
             continue
     picks_sorted = sorted(picks, key=lambda x: x.get("confidence",0), reverse=True)
     top4 = picks_sorted[:4]
-    d = load_data(); d["last_scan"] = {"time": datetime.utcnow().isoformat(), "picks": top4}; save_data(d)
+    d = load_data(); d["last_scan"] = {"time": now_iso(), "picks": top4}; save_data(d)
     return top4
 
-# End of PART 3
-# Paste PART 4 next.
-# ---------- bot.py (PART 4 of 4) ----------
-# AI wrapper, Telegram handlers, PnL linking, UI, scanner thread, startup
+def suggest_allocation_for_picks(top4):
+    d = load_data(); balance = d["challenge"].get("balance", CHALLENGE_START)
+    total_conf = sum([t.get("confidence",0) for t in top4]) or 1.0
+    suggestions = []
+    for t in top4:
+        conf = t.get("confidence",0)
+        allocated_cap = (conf / total_conf) * balance
+        risk_amt = (balance * RISK_PERCENT) / 100.0
+        diff = abs(t["entry"] - t["sl"]) if abs(t["entry"] - t["sl"]) > 1e-12 else 1e-12
+        pos_size = round(risk_amt / diff, 8)
+        suggestions.append({"signal": t, "allocated_capital": round(allocated_cap,4), "risk_amt": round(risk_amt,6), "pos_size": pos_size})
+    return suggestions
 
-# ---------- OpenAI helper ----------
+# End PART 3
+# ---------- bot.py (PART 4 of 4) ----------
+# Telegram UI, handlers, AI calls, PnL workflow, scanner thread, startup
+
+# OpenAI helper (must be set in env OPENAI_API_KEY)
 def ai_text_analysis(prompt):
     if not OPENAI_API_KEY:
-        return "AI disabled (OPENAI_API_KEY not set)."
+        return "AI disabled: OPENAI_API_KEY not set in environment."
     try:
         import openai
         openai.api_key = OPENAI_API_KEY
-        # Using a stable model - change if you have access to another model
         resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role":"system","content":"You are a professional crypto market analyst."},
@@ -617,7 +581,7 @@ def ai_text_analysis(prompt):
         log_exc(e)
         return f"AI error: {e}"
 
-# ---------- keyboard / menu ----------
+# build main menu
 def main_menu():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -634,7 +598,7 @@ def main_menu():
         kb.add(types.InlineKeyboardButton(f"Auto-Scan: {'ON' if auto else 'OFF'}", callback_data="toggle_auto_scan"))
     return kb
 
-# ---------- callbacks ----------
+# callback handler
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
@@ -652,9 +616,9 @@ def callback_handler(call):
         if data.startswith("signal_pair_"):
             pair = data.split("_",2)[2]
             try:
-                sig = generate_signal_improved(pair, base_interval=DEFAULT_INTERVAL)
+                sig = generate_signal_for(pair, base_interval=DEFAULT_INTERVAL)
                 if sig.get("error"):
-                    bot.send_message(chat_id, f"Error generating signal: {sig['error']}")
+                    bot.send_message(chat_id, f"Error generating: {sig['error']}")
                     return
                 record_and_send(sig, chat_id=chat_id, user_id=user_id)
                 bot.answer_callback_query(call.id, "Signal generated.")
@@ -679,7 +643,7 @@ def callback_handler(call):
         if data.startswith("picksend_"):
             sym = data.split("_",1)[1]
             last_scan = d.get("last_scan", {}).get("picks", [])
-            pick = next((p for p in last_scan if p["symbol"].upper() == sym.upper()), None)
+            pick = next((p for p in last_scan if p["symbol"].upper()==sym.upper()), None)
             if not pick:
                 bot.answer_callback_query(call.id, "Pick not found.")
                 return
@@ -696,7 +660,7 @@ def callback_handler(call):
             txt = f"Allocation suggestions (balance ${d['challenge']['balance']:.2f}):\n"
             for s in sug:
                 txt += f"- {s['signal']['symbol']} {s['signal']['signal']} conf:{int(s['signal']['confidence']*100)}% alloc:${s['allocated_capital']:.2f} risk:${s['risk_amt']:.4f}\n"
-            send_logo_with_optional_chart(chat_id, txt)
+            send_brand_then_text(chat_id, txt)
             bot.answer_callback_query(call.id, "Allocation shown.")
             return
 
@@ -711,7 +675,7 @@ def callback_handler(call):
                 return
             if CHANNEL_ID:
                 try:
-                    bot.send_message(CHANNEL_ID, f"📢 Official Signal posted by admin:\n{json.dumps(rec['signal'], indent=2)}")
+                    bot.send_message(CHANNEL_ID, f"📢 Official Signal by admin:\n{json.dumps(rec['signal'], indent=2)}")
                 except Exception as e:
                     bot.send_message(user_id, f"Failed to post to channel: {e}")
             bot.send_message(user_id, f"Signal {sig_id} confirmed.")
@@ -739,7 +703,7 @@ def callback_handler(call):
             c = d["challenge"]; wins=c.get("wins",0); losses=c.get("losses",0); bal=c.get("balance", CHALLENGE_START)
             total = wins + losses; acc = (wins/total*100) if total else 0.0
             txt = f"🏆 Boss Destiny Challenge\nBalance: ${bal:.2f}\nWins: {wins} Losses: {losses}\nAccuracy: {acc:.1f}%\nTarget: ${CHALLENGE_TARGET}"
-            send_logo_with_optional_chart(chat_id, txt, reply_markup=main_menu())
+            send_brand_then_text(chat_id, txt, reply_markup=main_menu())
             return
 
         if data == "pnl_upload":
@@ -779,7 +743,17 @@ def callback_handler(call):
         except:
             pass
 
-# ---------- photo handler ----------
+# helper to send brand image then text
+def send_brand_then_text(chat_id, text, reply_markup=None):
+    try:
+        if BRAND_IMAGE_BYTES:
+            bot.send_photo(chat_id, BytesIO(BRAND_IMAGE_BYTES), caption=text, reply_markup=reply_markup)
+            return
+    except Exception:
+        pass
+    bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+# photo handler (save uploads)
 @bot.message_handler(content_types=["photo"])
 def photo_handler(message):
     try:
@@ -795,10 +769,9 @@ def photo_handler(message):
         save_data(d)
         bot.reply_to(message, "Saved screenshot. To link: send #link <signal_id> TP1 or SL")
     except Exception as e:
-        log_exc(e)
-        bot.reply_to(message, "Failed to save screenshot.")
+        log_exc(e); bot.reply_to(message, "Failed to save screenshot.")
 
-# ---------- #link handler ----------
+# #link handler
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().startswith("#link"))
 def link_handler(message):
     try:
@@ -816,20 +789,19 @@ def link_handler(message):
             bot.reply_to(message, "No unlinked screenshot found. Upload first.")
             return
         pnl_item["linked"] = {"signal_id": sig_id, "result": tag, "linked_by": message.from_user.id}
-        # Admin confirmation updates challenge
         if message.from_user.id == ADMIN_ID:
             srec = next((s for s in d["signals"] if s["id"]==sig_id), None)
             if srec:
-                entry = float(srec["signal"].get("entry", 0)); sl = float(srec["signal"].get("sl", entry))
-                tp1 = float(srec["signal"].get("tp1", entry)); tp2 = float(srec["signal"].get("tp2", tp1))
-                pos_size = float(srec.get("pos_size", 0.0))
-                side = srec["signal"].get("signal", "BUY")
+                entry = float(srec["signal"].get("entry",0)); sl = float(srec["signal"].get("sl",entry))
+                tp1 = float(srec["signal"].get("tp1",entry)); tp2 = float(srec["signal"].get("tp2",tp1))
+                pos_size = float(srec.get("pos_size",0.0))
+                side = srec["signal"].get("signal","BUY")
                 if tag.startswith("TP"):
                     exit_price = tp1 if tag=="TP1" else tp2
-                    pnl_units = (exit_price - entry) * pos_size if side != "SELL" else (entry - exit_price) * pos_size
+                    pnl_units = (exit_price - entry) * pos_size if side!="SELL" else (entry - exit_price) * pos_size
                 else:
                     exit_price = sl
-                    pnl_units = (exit_price - entry) * pos_size if side != "SELL" else (entry - exit_price) * pos_size
+                    pnl_units = (exit_price - entry) * pos_size if side!="SELL" else (entry - exit_price) * pos_size
                 d["challenge"]["balance"] = d["challenge"].get("balance", CHALLENGE_START) + float(pnl_units)
                 if tag.startswith("TP"):
                     d["challenge"]["wins"] = d["challenge"].get("wins",0) + 1
@@ -838,7 +810,7 @@ def link_handler(message):
                     d["challenge"]["losses"] = d["challenge"].get("losses",0) + 1
                     d["stats"]["losses"] = d["stats"].get("losses",0) + 1
                 srec["result"] = tag
-                d["challenge"]["history"].append({"time": datetime.utcnow().isoformat(), "note": f"{sig_id} {tag}", "change": float(pnl_units)})
+                d["challenge"]["history"].append({"time": now_iso(), "note": f"{sig_id} {tag}", "change": float(pnl_units)})
             save_data(d)
             try:
                 bot.send_photo(message.chat.id, open(pnl_item["file"], "rb"), caption=f"Linked {sig_id} as {tag}. Balance: ${d['challenge']['balance']:.2f}")
@@ -846,12 +818,11 @@ def link_handler(message):
                 pass
         else:
             save_data(d)
-        bot.reply_to(message, f"Linked screenshot to {sig_id} as {tag}. Admin confirmation needed to update challenge.")
+        bot.reply_to(message, f"Linked screenshot to {sig_id} as {tag}. Admin must confirm to update challenge.")
     except Exception as e:
-        log_exc(e)
-        bot.reply_to(message, "Error linking screenshot.")
+        log_exc(e); bot.reply_to(message, "Error linking screenshot.")
 
-# ---------- text handler ----------
+# text handler
 @bot.message_handler(func=lambda m: True)
 def all_messages(message):
     try:
@@ -861,13 +832,13 @@ def all_messages(message):
             d["users"].append(message.from_user.id); save_data(d)
 
         if text.lower() == "menu":
-            send_logo_with_optional_chart(message.chat.id, "Boss Destiny Menu", reply_markup=main_menu())
+            send_brand_then_text(message.chat.id, "Boss Destiny Menu", reply_markup=main_menu())
             return
 
         if text.startswith("AI:"):
             prompt = text[3:].strip()
             out = ai_text_analysis(prompt)
-            send_logo_with_optional_chart(message.chat.id, f"🤖 AI:\n\n{out}")
+            send_brand_then_text(message.chat.id, f"🤖 AI:\n\n{out}")
             return
 
         if text.lower().startswith("price "):
@@ -882,23 +853,22 @@ def all_messages(message):
                 except Exception as e:
                     bot.reply_to(message, f"Price fetch error: {e}")
                     return
-            bot.reply_to(message, "Usage: price <SYMBOL> e.g. price BTCUSDT")
+            bot.reply_to(message, "Usage: price <SYMBOL>")
             return
 
         if text.upper() in [p.upper() for p in PAIRS]:
             sym = text.upper()
             try:
-                sig = generate_signal_improved(sym, base_interval=DEFAULT_INTERVAL)
+                sig = generate_signal_for(sym, base_interval=DEFAULT_INTERVAL)
                 if sig.get("error"):
                     bot.reply_to(message, f"Error: {sig['error']}")
                     return
-                send_logo_with_optional_chart(message.chat.id, f"Quick analysis {sym}:\nSignal: {sig['signal']}\nEntry:{sig['entry']} SL:{sig['sl']} Conf:{int(sig['confidence']*100)}% SuggestedLev:{sig.get('suggested_leverage',1)}x")
+                send_brand_then_text(message.chat.id, f"Quick analysis {sym}:\nSignal: {sig['signal']}\nEntry:{sig['entry']} SL:{sig['sl']} Conf:{int(sig['confidence']*100)}% SuggestedLev:{sig.get('suggested_leverage',1)}x")
             except Exception as e:
                 bot.reply_to(message, f"Error fetching: {e}")
             return
 
-        # fallback
-        send_logo_with_optional_chart(message.chat.id, "Tap a button to start:", reply_markup=main_menu())
+        send_brand_then_text(message.chat.id, "Tap a button to start:", reply_markup=main_menu())
     except Exception as e:
         log_exc(e)
         try:
@@ -906,7 +876,7 @@ def all_messages(message):
         except:
             pass
 
-# ---------- background scanner ----------
+# scanner loop
 def scanner_loop():
     log_info(f"Scanner started for pairs: {PAIRS} interval: {DEFAULT_INTERVAL}")
     while True:
@@ -920,8 +890,8 @@ def scanner_loop():
                         sug = suggest_allocation_for_picks(top)
                         txt = f"Auto-scan picks (balance ${bal:.2f}):\n"
                         for s in sug:
-                            sig = s['signal']; txt += f"- {sig['symbol']} {sig['signal']} conf:{int(sig['confidence']*100)}% entry:{sig['entry']} alloc:${s['allocated_capital']:.2f}\n"
-                        send_logo_with_optional_chart(ADMIN_ID, txt)
+                            sig = s["signal"]; txt += f"- {sig['symbol']} {sig['signal']} conf:{int(sig['confidence']*100)}% entry:{sig['entry']} alloc:${s['allocated_capital']:.2f}\n"
+                        send_brand_then_text(ADMIN_ID, txt)
                 except Exception as e:
                     log_exc(e)
                 time.sleep(60)
@@ -931,11 +901,12 @@ def scanner_loop():
             log_exc(e)
             time.sleep(10)
 
-# ---------- start services ----------
+# start services
 def start_services():
+    # keepalive optional
     port = int(os.getenv("PORT", "8080"))
-    t_flask = threading.Thread(target=run_keepalive, args=("0.0.0.0", port), daemon=True)
-    t_flask.start(); log_info(f"Keepalive started on port {port}")
+    t_keep = threading.Thread(target=run_keepalive, args=("0.0.0.0", port), daemon=True)
+    t_keep.start(); log_info(f"Keepalive started on port {port}")
 
     t_scan = threading.Thread(target=scanner_loop, daemon=True)
     t_scan.start(); log_info("Scanner thread started")
@@ -944,11 +915,7 @@ def start_services():
     bot.infinity_polling(timeout=60, long_polling_timeout=60)
 
 if __name__ == "__main__":
-    log_info("Boss Destiny Trading Bot v3 starting...")
+    log_info("Boss Destiny Trading Empire Bot starting...")
     start_services()
-
-if __name__ == "__main__":
-    print("🤖 Boss Destiny Futures Bot is online and scanning markets...")
-    bot.infinity_polling(timeout=10, long_polling_timeout=5)
 
 # End of PART 4
