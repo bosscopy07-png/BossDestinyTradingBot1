@@ -1,10 +1,10 @@
-pyTelegramBotAPI==4.12.0
+pyTelegramBotAPI
 requests
 pandas
 numpy
 pillow
-openai
 matplotlib
-ccxt
-python-binance
+openai
 flask
+urllib3
+python-dotenv
