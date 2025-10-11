@@ -946,5 +946,9 @@ def start_services():
 if __name__ == "__main__":
     log_info("Boss Destiny Trading Bot v3 starting...")
     start_services()
+    
+    if __name__ == "__main__":
+    print("🤖 Boss Destiny Futures Bot is online and scanning markets...")
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
 
 # End of PART 4
