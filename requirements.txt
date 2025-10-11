@@ -1,4 +1,5 @@
 pyTelegramBotAPI
+aiohttp
 requests
 pandas
 numpy
