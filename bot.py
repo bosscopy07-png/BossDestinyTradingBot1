@@ -425,6 +425,11 @@ def compute_risk_and_size(entry, sl, balance, risk_percent):
     Calculate risk amount (USD) and position size in quote units approximated by price difference.
     (This is a simplified calculation for manual execution).
     """
+Returns DataFrame of klines from Binance API
+Retries up to 3 times on network errors
+"""
+def fetch_klines_df(...):
+    ...
     try:
         risk_amount = (balance * risk_percent) / 100.0
         diff = abs(entry - sl)
