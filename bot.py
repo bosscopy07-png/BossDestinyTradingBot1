@@ -1,5 +1,6 @@
-# ---------- bot.py : PART 1/4 ----------
-# Boss Destiny Trading Empire — Final Pro Bot (Part 1: setup & utils)
+# ---------- bot.py : PART 1/5 ----------
+# Boss Destiny Trading Empire — Part 1: setup & utilities
+# Paste this as the first section of bot.py
 
 import os
 import time
@@ -20,7 +21,7 @@ from PIL import Image, ImageDraw, ImageFont
 import telebot
 from telebot import types
 
-# matplotlib optional (for charts). If missing, bot still works.
+# Optional plotting (candles) — not required, but nice if available
 MATPLOTLIB_AVAILABLE = False
 try:
     import matplotlib
@@ -31,9 +32,10 @@ try:
 except Exception:
     MATPLOTLIB_AVAILABLE = False
 
-# Flask keepalive (optional)
-from flask import Flask
+# Keepalive (Flask) for webhook deployment (optional)
+from flask import Flask, request
 app = Flask(__name__)
+
 @app.route("/")
 def index():
     return "Boss Destiny Trading Empire Bot — Alive"
@@ -44,43 +46,43 @@ def run_keepalive(host="0.0.0.0", port=8080):
     except Exception as e:
         print("Keepalive error:", e)
 
-# ---------------- CONFIG (via env) ----------------
+# ---------------- CONFIG (via environment variables) ----------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ADMIN_ID = int(os.getenv("ADMIN_ID","0"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # optional but recommended
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = os.getenv("CHANNEL_ID") or None
 
-DEFAULT_INTERVAL = os.getenv("SIGNAL_INTERVAL","1h")
-PAIRS = os.getenv("PAIRS","BTCUSDT,ETHUSDT,BNBUSDT,ADAUSDT,SOLUSDT").split(",")
-EMA_FAST = int(os.getenv("EMA_FAST","9"))
-EMA_SLOW = int(os.getenv("EMA_SLOW","21"))
-RSI_PERIOD = int(os.getenv("RSI_PERIOD","14"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT","5"))
-MIN_VOLUME = float(os.getenv("MIN_VOLUME","0"))
-SIGNAL_COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN","30"))
-CHALLENGE_START = float(os.getenv("CHALLENGE_START","10"))
-CHALLENGE_TARGET = float(os.getenv("CHALLENGE_TARGET","100"))
-MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE","20"))
+DEFAULT_INTERVAL = os.getenv("SIGNAL_INTERVAL", "1h")
+PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,ADAUSDT,SOLUSDT").split(",")
+EMA_FAST = int(os.getenv("EMA_FAST", "9"))
+EMA_SLOW = int(os.getenv("EMA_SLOW", "21"))
+RSI_PERIOD = int(os.getenv("RSI_PERIOD", "14"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "5"))
+MIN_VOLUME = float(os.getenv("MIN_VOLUME", "0"))
+SIGNAL_COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
+CHALLENGE_START = float(os.getenv("CHALLENGE_START", "10"))
+CHALLENGE_TARGET = float(os.getenv("CHALLENGE_TARGET", "100"))
+MAX_LEVERAGE = int(os.getenv("MAX_LEVERAGE", "20"))
 
-DATA_FILE = os.getenv("DATA_FILE","data.json")
-UPLOAD_DIR = os.getenv("UPLOAD_DIR","uploads")
-LOG_DIR = os.getenv("LOG_DIR","logs")
-LOGO_TEXT = os.getenv("LOGO_TEXT","Boss Destiny Trading Empire")
+DATA_FILE = os.getenv("DATA_FILE", "data.json")
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "uploads")
+LOG_DIR = os.getenv("LOG_DIR", "logs")
+LOGO_TEXT = os.getenv("LOGO_TEXT", "Boss Destiny Trading Empire")
 
-# Validate essential env vars
+# Basic validation
 if not BOT_TOKEN:
-    raise RuntimeError("Missing BOT_TOKEN env var. Set it in your host.")
-if not OPENAI_API_KEY:
-    print("Warning: OPENAI_API_KEY not set. AI features will be disabled until it's configured.")
+    raise RuntimeError("Missing BOT_TOKEN environment variable.")
+if ADMIN_ID == 0:
+    raise RuntimeError("Set ADMIN_ID (your numeric Telegram id) in env variables.")
 
-# Telegram bot
+# Telegram bot instance (polling mode fallback)
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
-# make directories
+# Ensure directories exist
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# ---------------- storage & logging ----------------
+# ---------------- storage & logging utilities ----------------
 def atomic_write(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
@@ -92,8 +94,8 @@ def init_storage():
         obj = {
             "signals": [],
             "pnl": [],
-            "challenge": {"balance": CHALLENGE_START, "wins":0, "losses":0, "history":[]},
-            "stats": {"total_signals":0, "wins":0, "losses":0},
+            "challenge": {"balance": CHALLENGE_START, "wins": 0, "losses": 0, "history": []},
+            "stats": {"total_signals": 0, "wins": 0, "losses": 0},
             "last_scan": {},
             "auto_scan": False,
             "users": []
@@ -135,16 +137,17 @@ def nice(x, nd=8):
 def now_iso():
     return datetime.utcnow().isoformat()
 
-# --------- Brand image creation using textbbox (fix for Pillow versions) ----------
+# ---------- Brand image creation using ImageDraw.textbbox (Pillow-safe) ----------
 def create_brand_image(text=LOGO_TEXT, size=(900,140), font_size=36):
     try:
         img = Image.new("RGBA", size, (255,255,255,255))
         draw = ImageDraw.Draw(img)
         try:
+            # prefer a TTF if present (better visuals)
             font = ImageFont.truetype("DejaVuSans.ttf", font_size)
         except Exception:
             font = ImageFont.load_default()
-        # Use textbbox to measure
+        # measure using textbbox (works on Pillow versions >= 8)
         bbox = draw.textbbox((0,0), text, font=font)
         w = bbox[2] - bbox[0]
         h = bbox[3] - bbox[1]
@@ -159,28 +162,15 @@ def create_brand_image(text=LOGO_TEXT, size=(900,140), font_size=36):
 
 BRAND_IMAGE_BYTES = create_brand_image()
 
-# Utilities for threading tasks
+# Utilities for threading async tasks
 def run_in_thread(fn, *a, **kw):
     t = threading.Thread(target=fn, args=a, kwargs=kw, daemon=True)
     t.start()
     return t
 
-# End PART 1
-# ---------- bot.py : PART 2/4 ----------
-# Data fetchers (Binance, Bybit, CoinGecko fallback), indicators, chart image
-
+# Safe HTTP session with retries (requests)
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-
-BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
-BYBIT_KLINES = "https://api.bybit.com/public/linear/kline"
-COINGECKO_MARKET_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
-COINGECKO_MAP = {
-    "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "BNBUSDT":"binancecoin",
-    "ADAUSDT":"cardano","SOLUSDT":"solana","XRPUSDT":"ripple","DOGEUSDT":"dogecoin"
-}
-
-# requests session with retry
 _session = None
 def get_session():
     global _session
@@ -192,6 +182,32 @@ def get_session():
         s.mount("http://", HTTPAdapter(max_retries=retries))
         _session = s
     return _session
+
+# Async fetch helper (aiohttp)
+async def fetch_json_aio(url, params=None, timeout=10):
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                else:
+                    log_info(f"fetch_json_aio returned {resp.status} for {url}")
+                    return None
+    except Exception as e:
+        log_exc(e)
+        return None
+
+# End of Part 1
+# ---------- bot.py : PART 2/5 ----------
+# Market data fetchers (Binance, Bybit, CoinGecko fallback), indicators, chart image
+
+BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+BYBIT_KLINES = "https://api.bybit.com/public/linear/kline"
+COINGECKO_MARKET_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
+COINGECKO_MAP = {
+    "BTCUSDT":"bitcoin", "ETHUSDT":"ethereum", "BNBUSDT":"binancecoin",
+    "ADAUSDT":"cardano","SOLUSDT":"solana","XRPUSDT":"ripple","DOGEUSDT":"dogecoin"
+}
 
 def normalize_interval(s):
     if not s: return DEFAULT_INTERVAL
@@ -304,7 +320,7 @@ def compute_atr(df, period=14):
     atr = tr.rolling(period, min_periods=1).mean()
     return atr
 
-# optional candle chart generation
+# optional candle chart generation (matplotlib must be available)
 def generate_candlestick_image(df, symbol, candles=80):
     if not MATPLOTLIB_AVAILABLE:
         return None
@@ -332,13 +348,13 @@ def generate_candlestick_image(df, symbol, candles=80):
         return None
 
 # End PART 2
-# ---------- bot.py : PART 3/4 ----------
+# ---------- bot.py : PART 3/5 ----------
 # Signal engine + leverage suggestion + scanning + trending
 
 def suggest_leverage(confidence, price, atr, base_max_leverage=MAX_LEVERAGE):
     try:
         vol_ratio = (atr / price) if price > 0 else 0
-        base = max(1.0, confidence * base_max_leverage)
+        base = max(1.0, confidence * base_max_leverage * 2)  # amplify confidence effect
         if vol_ratio > 0.03:
             base *= 0.3
         elif vol_ratio > 0.015:
@@ -352,15 +368,8 @@ def suggest_leverage(confidence, price, atr, base_max_leverage=MAX_LEVERAGE):
 def generate_signal_for(symbol="BTCUSDT", base_interval="1h"):
     try:
         base_tf = normalize_interval(base_interval)
-        high_tf = "4h"
         df = fetch_klines_df(symbol, interval=base_tf, limit=300)
-        df_high = None
-        try:
-            df_high = fetch_klines_df(symbol, interval=high_tf, limit=200)
-        except Exception:
-            df_high = None
-
-        if df is None or len(df) < 30:
+        if df is None or len(df) < 20:
             return {"error":"insufficient data"}
 
         df["ema_fast"] = ema(df["close"], EMA_FAST)
@@ -380,7 +389,7 @@ def generate_signal_for(symbol="BTCUSDT", base_interval="1h"):
         if (prev["ema_fast"] >= prev["ema_slow"]) and (last["ema_fast"] < last["ema_slow"]):
             signal = "SELL"; reasons.append("EMA cross down"); score += 0.28
 
-        # MACD
+        # MACD bias
         if last["macd_hist"] > 0:
             reasons.append("MACD positive"); score += 0.10
         else:
@@ -405,21 +414,6 @@ def generate_signal_for(symbol="BTCUSDT", base_interval="1h"):
         if signal=="SELL" and r<22:
             reasons.append(f"Low RSI {r:.1f}"); score -= 0.14
 
-        # 4h confirmation
-        try:
-            if df_high is not None and len(df_high) >= 10:
-                df_high["ema_fast"] = ema(df_high["close"], EMA_FAST)
-                df_high["ema_slow"] = ema(df_high["close"], EMA_SLOW)
-                last_h = df_high.iloc[-1]
-                if signal=="BUY" and last_h["ema_fast"] < last_h["ema_slow"]:
-                    reasons.append("4h contradicts"); score -= 0.25
-                if signal=="SELL" and last_h["ema_fast"] > last_h["ema_slow"]:
-                    reasons.append("4h contradicts"); score -= 0.25
-                if ((last_h["ema_fast"] > last_h["ema_slow"]) and signal=="BUY") or ((last_h["ema_fast"] < last_h["ema_slow"]) and signal=="SELL"):
-                    score += 0.12
-        except Exception:
-            pass
-
         vol = float(last.get("volume",0.0))
         if MIN_VOLUME and vol < MIN_VOLUME:
             reasons.append("Low volume"); score -= 0.08
@@ -428,7 +422,6 @@ def generate_signal_for(symbol="BTCUSDT", base_interval="1h"):
             reasons.append("High ATR - volatile"); score -= 0.30
 
         confidence = max(0.05, min(0.98, 0.5 + score))
-
         if signal == "BUY":
             swing_sl = float(df["low"].iloc[-3])
             sl_by_atr = price - (atr * 1.5) if atr>0 else swing_sl
@@ -498,7 +491,8 @@ def record_and_send(sig_obj, chat_id=None, user_id=None):
         chart = None
         try:
             df = fetch_klines_df(sig_obj["symbol"], interval=sig_obj["interval"], limit=120)
-            chart = generate_candlestick_image(df, sig_obj["symbol"]) if MATPLOTLIB_AVAILABLE else None
+            if MATPLOTLIB_AVAILABLE:
+                chart = generate_candlestick_image(df, sig_obj["symbol"])
         except Exception:
             chart = None
 
@@ -537,7 +531,7 @@ def record_and_send(sig_obj, chat_id=None, user_id=None):
         log_exc(e)
         return None
 
-# scanner and helpers
+# scanner helpers
 def scan_and_get_top4(pairs=None, interval=DEFAULT_INTERVAL):
     pairs = pairs or PAIRS
     picks = []
@@ -581,36 +575,77 @@ def get_trending_pairs(n=5):
     return trends_sorted[:n]
 
 # End PART 3
-# ---------- bot.py : PART 4/4 ----------
-# Telegram handlers + OpenAI new client + PnL linking + scanner + startup
+# ---------- bot.py : PART 4/5 ----------
+# OpenAI new client (openai>=1.0.0) integration and AI helpers
 
-# OpenAI new client (install openai>=1.0.0)
-from openai import OpenAI
 _openai_client = None
-if OPENAI_API_KEY:
-    try:
+try:
+    if OPENAI_API_KEY:
+        # import inside try to handle missing library gracefully
+        from openai import OpenAI
         _openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    except Exception as e:
-        log_exc(e); _openai_client = None
+    else:
+        _openai_client = None
+except Exception as e:
+    log_exc(e)
+    _openai_client = None
 
-def ask_ai(prompt):
+def ask_ai(prompt, system="You are a professional crypto market analyst. Provide a short, actionable buy/sell decision, leverage suggestion, and 2 quick risk controls."):
     if not _openai_client:
         return "AI not configured (OPENAI_API_KEY missing or client init failed)."
     try:
         resp = _openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"system","content":"You are a professional crypto market analyst."},
-                      {"role":"user","content":prompt}],
-            max_tokens=500,
+            messages=[{"role":"system","content":system},{"role":"user","content":prompt}],
+            max_tokens=450,
             temperature=0.2
         )
-        # New client returns choices with message content
         return resp.choices[0].message.content.strip()
     except Exception as e:
         log_exc(e)
         return f"AI error: {e}"
 
-# Main menu builder
+# Image builder for a signal summary (image with watermark)
+def build_signal_image(sig):
+    try:
+        text = (
+            f"{sig['symbol']}  {sig['interval']}\nSignal: {sig['signal']}\nEntry: {sig['entry']}  SL: {sig['sl']}\n"
+            f"TP1: {sig['tp1']} TP2: {sig['tp2']}\nConf: {int(sig.get('confidence',0)*100)}%  Lev: {sig.get('suggested_leverage',1)}x"
+        )
+        img = Image.new("RGB", (900, 400), color=(18, 18, 20))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 20)
+        except:
+            font = ImageFont.load_default()
+        # draw text using textbbox for positions
+        bbox = draw.textbbox((0,0), text, font=font)
+        draw.text((30,30), text, fill=(255,255,255), font=font)
+        # watermark bottom-right
+        wm = LOGO_TEXT
+        wb = draw.textbbox((0,0), wm, font=font)
+        draw.text((img.width - (wb[2]-wb[0]) - 20, img.height - (wb[3]-wb[1]) - 20), wm, fill=(120,120,120), font=font)
+        buf = BytesIO(); img.save(buf, format="PNG"); buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        log_exc(e)
+        return None
+
+# small helper to send brand image then text
+def send_brand_then_text(chat_id, text, reply_markup=None):
+    try:
+        if BRAND_IMAGE_BYTES:
+            bot.send_photo(chat_id, BytesIO(BRAND_IMAGE_BYTES), caption=text, reply_markup=reply_markup)
+            return
+    except Exception:
+        pass
+    bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+# End PART 4
+# ---------- bot.py : PART 5/5 ----------
+# Telegram handlers + PnL linking + scanner + startup
+
+# Build main menu
 def main_menu():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -627,13 +662,12 @@ def main_menu():
     )
     return kb
 
-# safe news fetch (CoinGecko status updates as fallback)
+# Market news (simple CoinGecko status)
 def fetch_market_news(limit=5):
     try:
         r = requests.get("https://api.coingecko.com/api/v3/status_updates", timeout=8)
         if r.status_code != 200: return []
-        j = r.json()
-        updates = j.get("status_updates", [])[:limit]
+        j = r.json(); updates = j.get("status_updates", [])[:limit]
         out = []
         for u in updates:
             out.append({"title": u.get("description", "")[:200], "category": u.get("category","")})
@@ -641,7 +675,7 @@ def fetch_market_news(limit=5):
     except Exception as e:
         log_exc(e); return []
 
-# Telegram callback handler
+# callback handler
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
@@ -658,12 +692,15 @@ def callback_handler(call):
 
         if data.startswith("signal_pair_"):
             pair = data.split("_",2)[2]
-            sig = generate_signal_for(pair, base_interval=DEFAULT_INTERVAL)
-            if sig.get("error"):
-                bot.send_message(cid, f"Signal error: {sig['error']}")
-                return
-            record_and_send(sig, chat_id=cid, user_id=uid)
-            bot.answer_callback_query(call.id, "Signal generated.")
+            bot.send_message(cid, f"Fetching signal for {pair} ...")
+            try:
+                sig = generate_signal_for(pair, base_interval=DEFAULT_INTERVAL)
+                if sig.get("error"):
+                    bot.send_message(cid, f"Signal error: {sig['error']}")
+                    return
+                record_and_send(sig, chat_id=cid, user_id=uid)
+            except Exception as e:
+                log_exc(e); bot.send_message(cid, f"Failed to generate signal: {e}")
             return
 
         if data == "scan_top4":
@@ -740,7 +777,7 @@ def callback_handler(call):
             return
 
         if data == "pnl_upload":
-            bot.send_message(cid, "Upload PnL screenshot now; then link with: #link <signal_id> TP1 or SL")
+            bot.send_message(cid, "Upload PnL screenshot now; then link it with: #link <signal_id> TP1 or SL")
             return
 
         if data.startswith("post_"):
@@ -865,7 +902,7 @@ def link_handler(message):
     except Exception as e:
         log_exc(e); bot.reply_to(message, "Error linking screenshot.")
 
-# text message handler
+# text handler
 @bot.message_handler(func=lambda m: True)
 def all_messages(message):
     try:
@@ -919,15 +956,6 @@ def all_messages(message):
         except:
             pass
 
-def send_brand_then_text(chat_id, text, reply_markup=None):
-    try:
-        if BRAND_IMAGE_BYTES:
-            bot.send_photo(chat_id, BytesIO(BRAND_IMAGE_BYTES), caption=text, reply_markup=reply_markup)
-            return
-    except Exception:
-        pass
-    bot.send_message(chat_id, text, reply_markup=reply_markup)
-
 # scanner loop (background)
 def scanner_loop():
     log_info(f"Scanner started for pairs: {PAIRS} interval: {DEFAULT_INTERVAL}")
@@ -949,17 +977,54 @@ def scanner_loop():
             log_exc(e)
             time.sleep(10)
 
+# STARTUP: support both polling and webhook
 def start_services():
-    # start keepalive (if running as web service)
+    # keepalive (optional)
     port = int(os.getenv("PORT","8080"))
     run_keep = os.getenv("RUN_KEEPALIVE","true").lower() in ("1","true","yes")
     if run_keep:
         t_keep = threading.Thread(target=run_keepalive, args=("0.0.0.0", port), daemon=True)
         t_keep.start(); log_info(f"Keepalive started on port {port}")
+
+    # scanner thread
     t_scan = threading.Thread(target=scanner_loop, daemon=True)
     t_scan.start(); log_info("Scanner thread started")
-    log_info("Starting Telegram polling...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+
+    # webhook mode if RUN_WEBHOOK env var set
+    run_webhook = os.getenv("RUN_WEBHOOK","false").lower() in ("1","true","yes")
+    if run_webhook:
+        # set webhook to your app URL + token. Ensure HTTPS and domain set on host.
+        public_url = os.getenv("WEBHOOK_URL")  # e.g. "https://your-app.onrender.com"
+        if not public_url:
+            log_info("RUN_WEBHOOK requested but WEBHOOK_URL not set. Falling back to polling.")
+        else:
+            try:
+                bot.remove_webhook()
+                bot.set_webhook(url=f"{public_url}/{BOT_TOKEN}")
+                log_info(f"Webhook set to {public_url}/{BOT_TOKEN}")
+                # Flask endpoint to receive updates:
+                @app.route(f"/{BOT_TOKEN}", methods=["POST"])
+                def telegram_webhook():
+                    try:
+                        update_json = request.get_data().decode("utf-8")
+                        update = telebot.types.Update.de_json(update_json)
+                        bot.process_new_updates([update])
+                    except Exception as e:
+                        log_exc(e)
+                    return "OK", 200
+                # run flask app
+                run_keepalive(port=port)
+                return
+            except Exception as e:
+                log_exc(e)
+                log_info("Webhook setup failed. Falling back to polling.")
+
+    # fallback: polling (ensure no other instance running)
+    log_info("Starting polling mode...")
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception as e:
+        log_exc(e)
 
 if __name__ == "__main__":
     log_info("Boss Destiny Trading Empire Bot starting...")
