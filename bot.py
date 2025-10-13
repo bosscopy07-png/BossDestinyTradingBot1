@@ -1,4 +1,4 @@
-# main.py
+# bot.py
 """
 Entry point for Boss Destiny Trading Bot.
 Run as a Background Worker (recommended) with:
@@ -20,7 +20,7 @@ from datetime import datetime
 # Import the bot starter function from bot_process (we'll supply next)
 # Keep imports lazy so this file remains small; other files will be separate.
 try:
-    from bot_process import start_bot_polling, start_flask_app, stop_existing_bot_instances,start_health_server
+    from bot_process import start_bot_polling, stop_existing_bot_instances, start_health_server
 except Exception as e:
     # if bot_process not present yet, print error but keep file usable
     print("Warning: bot_process module not found. Make sure bot_process.py is uploaded next.")
@@ -62,7 +62,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-# bot_process.py
+    # bot_process.py
 import os
 import time
 import json
@@ -335,6 +335,33 @@ def start_bot_polling():
         traceback.print_exc()
         time.sleep(5)
         start_bot_polling()
+        # ai_client.py
+import os
+import traceback
+from openai import OpenAI
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+client = None
+if OPENAI_API_KEY:
+    client = OpenAI(api_key=OPENAI_API_KEY)
+
+def ai_analysis_text(prompt):
+    if not client:
+        return "AI unavailable (OPENAI_API_KEY not set)."
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a professional crypto market analyst. Provide concise trade rationale, risk controls, and a one-line BUY/SELL verdict."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=350,
+            temperature=0.2
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        traceback.print_exc()
+        return f"AI error: {e}"
         # market_providers.py
 import os
 import time
@@ -511,33 +538,6 @@ def generate_signal_for(symbol="BTCUSDT", interval="1h"):
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
-        # ai_client.py
-import os
-import traceback
-from openai import OpenAI
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = None
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
-
-def ai_analysis_text(prompt):
-    if not client:
-        return "AI unavailable (OPENAI_API_KEY not set)."
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a professional crypto market analyst. Provide concise trade rationale, risk controls, and a one-line BUY/SELL verdict."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=350,
-            temperature=0.2
-        )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        traceback.print_exc()
-        return f"AI error: {e}"
         # storage.py
 import os
 import json
