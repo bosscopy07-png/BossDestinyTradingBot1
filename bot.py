@@ -10,7 +10,7 @@ sys.path.append(BASE_DIR)
 
 # --- Safe import with debug info ---
 try:
-    from bot_process import start_bot_polling, start_flask_app, stop_existing_bot_instances
+    from bot_runner import start_bot_polling, start_flask_app, stop_existing_bot_instances
 except ModuleNotFoundError as e:
     print("❌ Import error:", e)
     print("🔍 Files in current directory:", os.listdir(BASE_DIR))
