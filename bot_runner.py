@@ -34,7 +34,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # bot_process.py
+    # bot_runner.py
 import os
 import time
 import json
