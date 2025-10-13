@@ -46,6 +46,8 @@ from io import BytesIO
 import telebot
 from telebot import types
 
+from pro_features import top_gainers_pairs, fear_and_greed_index, quickchart_price_image, futures_leverage_suggestion, ai_market_brief_text
+from scheduler import start_scheduler, stop_scheduler
 from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
 from market_providers import fetch_klines_df, fetch_trending_pairs
 from signal_engine import generate_signal_for
