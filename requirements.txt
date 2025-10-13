@@ -10,5 +10,4 @@ openai==1.44.0
 beautifulsoup4==4.12.3
 lxml==5.3.0
 ccxt==4.3.89
-yfinance==0.2.40 --no-deps
 gunicorn==23.0.0
