@@ -11,11 +11,11 @@ sys.path.append(BASE_DIR)
 # --- Safe import with debug info ---
 try:
     from bot_runner import start_bot_polling, start_flask_app, stop_existing_bot_instances
-except ModuleNotFoundError as e:
-    print("❌ Import error:", e)
-    print("🔍 Files in current directory:", os.listdir(BASE_DIR))
-    raise SystemExit("Cannot start bot. Ensure bot_process.py is in the same folder as bot.py")
 
+if __name__ == "__main__":
+    stop_existing_bot_instances()
+    start_flask_app()  # Flask keeps Render port open
+    start_bot_polling()  # Bot runs in a background thread
 # --- Main runner ---
 def main():
     print("🟢 Initializing trading bot system...")
