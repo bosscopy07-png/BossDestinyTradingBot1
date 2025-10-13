@@ -10,7 +10,23 @@ sys.path.append(BASE_DIR)
 
 # --- Safe import with debug info ---
 try:
-    from bot_runner import start_bot_polling, start_flask_app, stop_existing_bot_instances
+    import os
+from bot_runner import start_bot_polling, start_flask_app, stop_existing_bot_instances
+
+# --- MAIN EXECUTION ---
+if __name__ == "__main__":
+    try:
+        # Stop any old bot instance
+        stop_existing_bot_instances()
+
+        # Start Flask (keeps Render port open)
+        start_flask_app()
+
+        # Start Telegram bot in background
+        start_bot_polling()
+
+    except Exception as e:
+        print(f"❌ Error starting bot: {e}")
 
 if __name__ == "__main__":
     stop_existing_bot_instances()
