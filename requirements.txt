@@ -1,8 +1,8 @@
 pyTelegramBotAPI==4.16.1
-requests==2.31.0
-pandas==2.2.3
-numpy==1.26.4
-Pillow==10.1.0
-openai==1.0.0
-flask==2.3.3
-urllib3==2.1.0
+Flask==3.0.3
+requests==2.32.3
+python-dotenv==1.0.1
+pytz==2024.1
+aiohttp==3.9.5
+openai==1.44.0
+gunicorn==23.0.0
