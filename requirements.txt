@@ -11,4 +11,5 @@ beautifulsoup4==4.12.3
 lxml==5.3.0
 ccxt==4.3.89
 yfinance==0.2.44
+peewee==3.17.6
 gunicorn==23.0.0
