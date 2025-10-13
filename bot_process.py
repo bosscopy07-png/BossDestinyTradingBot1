@@ -20,15 +20,20 @@ from datetime import datetime
 import sys, os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from bot_core import start_bot_polling, start_flask_app, stop_existing_bot_instances
+try:
+    from bot_process import start_bot_polling, start_flask_app, stop_existing_bot_instances
+except ModuleNotFoundError as e:
+    print("❌ Import error:", e)
+    print("🔍 Current directory contents:", os.listdir(os.path.dirname(os.path.abspath(__file__))))
+    raise
 
 # Import the bot starter function from bot_process (we'll supply next)
 # Keep imports lazy so this file remains small; other files will be separate.
 try:
-    from bot_core import start_bot_polling, stop_existing_bot_instances, start_health_server
+    from bot_process import start_bot_polling, stop_existing_bot_instances, start_health_server
 except Exception as e:
-    # if bot_core not present yet, print error but keep file usable
-    print("Warning: bot_core module not found. Make sure bot_core.py is uploaded next.")
+    # if bot_process not present yet, print error but keep file usable
+    print("Warning: bot_process module not found. Make sure bot_process.py is uploaded next.")
     start_bot_polling = None
     stop_existing_bot_instances = None
     start_health_server = None
@@ -67,7 +72,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-    # bot_core.py
+    # bot_process.py
 import os
 import time
 import json
