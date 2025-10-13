@@ -20,7 +20,7 @@ from datetime import datetime
 # Import the bot starter function from bot_process (we'll supply next)
 # Keep imports lazy so this file remains small; other files will be separate.
 try:
-    from bot_process import start_bot_polling as start_bot, stop_existing_bot_instances, start_health_server
+    from bot_process import start_bot_polling, start_flask_app, stop_existing_bot_instances,start_health_server
 except Exception as e:
     # if bot_process not present yet, print error but keep file usable
     print("Warning: bot_process module not found. Make sure bot_process.py is uploaded next.")
