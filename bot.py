@@ -1,39 +1,26 @@
 # bot.py
 import os
-import sys
-import threading
-import time
+from flask import Flask
 
-# --- Ensure the working directory is correct ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(BASE_DIR)
+# --- Telegram bot imports ---
+from bot_process import bot  # import your main bot instance
 
-# --- Safe import with debug info ---
-try:
-    from bot_process import start_bot_polling, start_flask_app, stop_existing_bot_instances
-except ModuleNotFoundError as e:
-    print("❌ Import error:", e)
-    print("🔍 Files in current directory:", os.listdir(BASE_DIR))
-    raise SystemExit("Cannot start bot. Ensure bot_process.py is in the same folder as bot.py")
+# --- Start Flask App ---
+app = Flask(__name__)
 
-# --- Main runner ---
-def main():
-    print("🟢 Initializing trading bot system...")
+@app.route('/')
+def index():
+    return "🤖 BossDestiny Trading Empire Bot is running successfully!"
 
-    # Stop any previous bot instances
-    stop_existing_bot_instances()
-
-    # Start Flask web app (for webhook or dashboard)
-    flask_thread = threading.Thread(target=start_flask_app, daemon=True)
-    flask_thread.start()
-    print("🌍 Flask app started in background.")
-
-    # Start Telegram bot polling
-    time.sleep(2)  # small delay to let Flask settle
-    start_bot_polling()
+def start_flask_app():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
-    main()
+    # Run Flask + Telegram polling in parallel
+    import threading
+    threading.Thread(target=lambda: bot.polling(none_stop=True, interval=0, timeout=60)).start()
+    start_flask_app()
     # bot_process.py
 import os
 import time
