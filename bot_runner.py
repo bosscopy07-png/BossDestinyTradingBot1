@@ -1,5 +1,4 @@
 import threading
-from bot import app
 
 import sys, os
 sys.dont_write_bytecode = True  # Prevents .pyc caching issues
