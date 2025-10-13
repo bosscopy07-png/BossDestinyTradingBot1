@@ -142,6 +142,19 @@ def main_keyboard():
         types.InlineKeyboardButton("🤖 Ask AI", callback_data="ask_ai"),
         types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot")
     )
+    kb.row(
+        types.InlineKeyboardButton("🚀 Top Movers", callback_data="top_gainers"),
+        types.InlineKeyboardButton("📈 Fear & Greed", callback_data="fear_greed")
+    )
+    kb.row(
+        types.InlineKeyboardButton("🖼️ Quick Chart", callback_data="open_chart_menu"),
+        types.InlineKeyboardButton("⚖️ Futures Suggest", callback_data="open_fut_menu")
+    )
+    # Add admin-only quick toggles
+    kb.row(
+        types.InlineKeyboardButton("▶️ Start Auto Brief", callback_data="start_auto_brief"),
+        types.InlineKeyboardButton("⏹ Stop Auto Brief", callback_data="stop_auto_brief")
+    )
     return kb
 
 @bot.message_handler(commands=['start','menu'])
