@@ -272,6 +272,49 @@ def callback_handler(call):
 
         if data == "bot_status":
             bot.send_message(cid, f"🤖 Bot active. Time: {datetime.utcnow().isoformat()}"); return
+            
+        if data == "top_gainers":
+            txt = top_gainers_pairs()
+            bot.send_message(cid, f"📊 Boss Destiny Top Movers:\n\n{txt}")
+            return
+
+        if data == "fear_greed":
+            txt = fear_and_greed_index()
+            bot.send_message(cid, f"📈 Boss Destiny Fear & Greed:\n\n{txt}")
+            return
+
+        if data.startswith("chart_"):
+            # callback data like "chart_BTCUSDT"
+            pair = data.split("_",1)[1]
+            img_bytes, err = quickchart_price_image(pair, interval="1h", points=60)
+            if img_bytes:
+                bot.send_photo(cid, img_bytes, caption=f"📈 {pair} — Boss Destiny Trading Empire")
+            else:
+                bot.send_message(cid, f"Chart error: {err}")
+            return
+
+        if data.startswith("fut_"):
+            pair = data.split("_",1)[1]
+            suggestion = futures_leverage_suggestion(pair)
+            bot.send_message(cid, f"⚖️ Futures suggestion for {pair}:\n{suggestion.get('suggestion')}")
+            return
+
+        if data == "start_auto_brief":
+            # admin only
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "Admins only")
+                return
+            start_scheduler(ADMIN_ID, interval_hours=4)
+            bot.send_message(cid, "🟢 Auto AI Market Brief started (every 4h).")
+            return
+
+        if data == "stop_auto_brief":
+            if call.from_user.id != ADMIN_ID:
+                bot.answer_callback_query(call.id, "Admins only")
+                return
+            stop_scheduler()
+            bot.send_message(cid, "🔴 Auto AI Market Brief stopped.")
+            return
 
         bot.answer_callback_query(call.id, "Unknown action")
     except Exception:
