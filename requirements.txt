@@ -2,7 +2,7 @@
 telebot==0.0.5
 pyTelegramBotAPI==4.23.0
 flask==3.0.2
-pandas==2.2.2
+pandas==2.2.3
 requests==2.32.3
 pillow==10.3.0
 numpy==2.3.3
