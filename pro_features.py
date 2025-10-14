@@ -199,3 +199,7 @@ def quickchart_price_image(symbol, interval="1h", points=30):
         r = requests.get(QUICKCHART_URL, params=params, timeout=15)
         r.raise_for_status()
         return r
+except Exception as e:
+    # handle error
+    print(f"Error: {e}")
+    return None
