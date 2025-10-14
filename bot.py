@@ -2,6 +2,7 @@
 import os
 import threading
 import traceback
+import time
 from datetime import datetime
 from flask import Flask
 
@@ -27,12 +28,12 @@ if __name__ == "__main__":
 
         print("Starting Flask server on port 8080...")
         app.run(host="0.0.0.0", port=8080)
-    try:
-        bot.polling(none_stop=True)
+
     except Exception as e:
-        print(f"Polling error: {e}")
-        time.sleep(5)  # wait a few seconds before retrying
-    # bot_runner.py
+        print("Critical error in main execution:")
+        traceback.print_exc()
+        time.sleep(5)
+# bot_runner.py
 import os
 import time
 import json
