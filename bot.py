@@ -28,9 +28,7 @@ if __name__ == "__main__":
         print("Starting Flask server on port 8080...")
         app.run(host="0.0.0.0", port=8080)
 
-    except Exception as e:
-        error_msg = f"[{datetime.utcnow().isoformat()}] ERROR: {e}\n" + traceback.format_exc()
-        print(error_msg)
+    except Exception
     # bot_runner.py
 import os
 import time
