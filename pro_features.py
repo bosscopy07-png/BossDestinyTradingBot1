@@ -279,3 +279,23 @@ def support_resistance(symbol, interval="1h", points=100, exchanges=None):
         print(f"[support_resistance] Error for {symbol}: {e}")
         traceback.print_exc()
         return {"error": str(e)}
+        
+def quickchart_price_image(symbol, interval="1h", points=30, exchanges=None):
+    if exchanges is None:
+        exchanges = DEFAULT_EXCHANGES
+    try:
+        df = fetch_klines_multi(symbol=symbol, exchange=exchanges[0], interval=interval, limit=points)
+        closes = df['close'].tolist()[-points:]
+        labels = [str(i + 1) for i in range(len(closes))]
+        chart_cfg = {
+            "type": "line",
+            "data": {"labels": labels, "datasets":[{"label": symbol, "data": closes, "fill": False, "borderColor": "blue"}]},
+            "options": {"plugins":{"legend":{"display": False}}, "scales":{"x":{"display": True}, "y":{"display": True}}}
+        }
+        params = {"c": json.dumps(chart_cfg), "width": 800, "height": 360, "devicePixelRatio": 2}
+        r = requests.get(QUICKCHART_URL, params=params, timeout=15)
+        r.raise_for_status()
+        return r.content
+    except Exception as e:
+        traceback.print_exc()
+        return None
