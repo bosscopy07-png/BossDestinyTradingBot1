@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from market_providers import get_session, fetch_klines_multi
+from market_providers import get_session, fetch_klines_multi as fetch_klines_df
 from ai_client import ai_analysis_text
 
 QUICKCHART_URL = "https://quickchart.io/chart"
