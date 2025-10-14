@@ -1,25 +1,37 @@
-import threading
 import os
 import telebot
-from flask import Flask
+import threading
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # your bot token from env
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
-
-@app.route("/")
-def home():
-    return "🤖 BossDestiny Trading Empire Bot is running!"
-
-def start_flask_app():
-    port = int(os.environ.get("PORT", 8080))
-    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port)).start()
 
 def start_bot_polling():
-    print("🚀 Bot polling started...")
-    threading.Thread(target=lambda: bot.infinity_polling(timeout=60, long_polling_timeout=10)).start()
+    @bot.message_handler(commands=["start"])
+    def start_message(message):
+        bot.reply_to(message, "🔥 Welcome to Boss Destiny Trading Empire!\nUse /help to see available commands.")
+
+    @bot.message_handler(commands=["help"])
+    def help_message(message):
+        bot.reply_to(
+            message,
+            "📊 Available Commands:\n"
+            "/start - Begin the bot\n"
+            "/signal - Get latest trading signal\n"
+            "/status - Check bot status\n"
+            "/trending - Show trending pairs"
+        )
+
+    @bot.message_handler(commands=["signal"])
+    def get_signal(message):
+        bot.reply_to(message, "📈 Generating signal... please wait.")
+        # Placeholder: later add your AI + market logic here
+        bot.send_message(message.chat.id, "✅ Signal: BUY BTCUSDT (1h timeframe)\nLeverage: x20")
+
+    print("🤖 Telegram bot polling started.")
+    bot.infinity_polling(timeout=60, long_polling_timeout=30)
 
 def stop_existing_bot_instances():
-    print("🧹 Cleaning old bot instances (if any)...")
-    # placeholder, if you want to add PID cleanup logic
-    pass
+    try:
+        os.system("pkill -f telebot")  # kills other bot processes
+    except Exception:
+        pass
