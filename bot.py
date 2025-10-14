@@ -27,8 +27,6 @@ if __name__ == "__main__":
 
         print("Starting Flask server on port 8080...")
         app.run(host="0.0.0.0", port=8080)
-
-while True:
     try:
         bot.polling(none_stop=True)
     except Exception as e:
