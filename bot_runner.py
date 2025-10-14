@@ -2,6 +2,8 @@
 import os
 import time
 import traceback
+import requests
+import logging
 from datetime import datetime
 
 from pro_features import (
