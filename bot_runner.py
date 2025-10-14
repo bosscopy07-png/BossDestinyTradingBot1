@@ -316,7 +316,7 @@ def fetch_klines_coingecko(symbol="BTCUSDT", interval="1h", limit=300):
     df = pd.DataFrame(rows, columns=["open_time","open","high","low","close","volume"])
     return df
 
-def fetch_klines_df(symbol="BTCUSDT", interval="1h", limit=300):
+def fetch_klines_multi(symbol="BTCUSDT", interval="1h", limit=300):
     errs = []
     try:
         return fetch_klines_binance(symbol, interval, limit)
