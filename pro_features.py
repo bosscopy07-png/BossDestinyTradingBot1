@@ -299,3 +299,17 @@ def quickchart_price_image(symbol, interval="1h", points=30, exchanges=None):
     except Exception as e:
         traceback.print_exc()
         return None
+
+def ai_market_brief_text(symbol, exchanges=None):
+    """
+    Get a short AI market analysis for a symbol.
+    """
+    if exchanges is None:
+        exchanges = ["binance", "bybit", "ftx", "kucoin", "okx"]
+    try:
+        data = get_multi_exchange_price(symbol, exchanges)
+        prompt = f"Provide a concise crypto market update for {symbol}.\nPrices across exchanges: {data['prices']}"
+        return ai_analysis_text(prompt)
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return f"⚠️ Error generating AI analysis: {e}"
