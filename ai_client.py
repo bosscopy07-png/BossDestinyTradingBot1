@@ -1,27 +1,30 @@
-# ai_client.py
 import os
-import traceback
 from openai import OpenAI
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-client = None
-if OPENAI_API_KEY:
-    client = OpenAI(api_key=OPENAI_API_KEY)
+# Load your API key from environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-def ai_analysis_text(prompt):
-    if not client:
-        return "AI unavailable (OPENAI_API_KEY not set)."
+# ✅ Initialize client (no 'proxies' argument — fully compatible with latest OpenAI)
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+def ai_analysis_text(prompt: str) -> str:
+    """
+    Generate AI-based analysis text using OpenAI API.
+    """
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # fast and smart model
             messages=[
-                {"role": "system", "content": "You are a professional crypto market analyst. Provide concise trade rationale, risk controls, and a one-line BUY/SELL verdict."},
+                {"role": "system", "content": "You are a crypto trading assistant that provides clear, concise market analysis."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=350,
-            temperature=0.2
+            temperature=0.7,
+            max_tokens=300
         )
-        return resp.choices[0].message.content.strip()
+
+        # ✅ Return the AI response text
+        return response.choices[0].message.content.strip()
+
     except Exception as e:
-        traceback.print_exc()
-        return f"AI error: {e}"
+        print(f"[AI ERROR] {e}")
+        return "⚠️ AI service is currently unavailable. Please try again later."
