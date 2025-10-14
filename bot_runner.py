@@ -12,7 +12,7 @@ from telebot import types
 from pro_features import top_gainers_pairs, fear_and_greed_index, quickchart_price_image, futures_leverage_suggestion, ai_market_brief_text
 from scheduler import start_scheduler, stop_scheduler
 from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
-from market_providers import fetch_klines_multi, fetch_trending_pairs
+from market_providers import fetch_klines_multi as fetch_klines_df, fetch_trending_pairs
 from signal_engine import generate_signal
 from ai_client import ai_analysis_text
 from image_utils import build_signal_image, safe_send_with_image
