@@ -3,7 +3,7 @@ import traceback
 from datetime import datetime
 import numpy as np
 import pandas as pd
-from market_providers import fetch_klines_multi
+from market_providers import fetch_klines_multi as fetch_klines_df
 
 # -------------------
 # INDICATOR FUNCTIONS
