@@ -28,11 +28,6 @@ if __name__ == "__main__":
         print("Starting Flask server on port 8080...")
         app.run(host="0.0.0.0", port=8080)
 
-import time
-import telebot
-
-bot = telebot.TeleBot("YOUR_BOT_TOKEN")
-
 while True:
     try:
         bot.polling(none_stop=True)
