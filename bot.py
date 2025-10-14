@@ -28,7 +28,17 @@ if __name__ == "__main__":
         print("Starting Flask server on port 8080...")
         app.run(host="0.0.0.0", port=8080)
 
-    except Exception:
+import time
+import telebot
+
+bot = telebot.TeleBot("YOUR_BOT_TOKEN")
+
+while True:
+    try:
+        bot.polling(none_stop=True)
+    except Exception as e:
+        print(f"Polling error: {e}")
+        time.sleep(5)  # wait a few seconds before retrying
     # bot_runner.py
 import os
 import time
