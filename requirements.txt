@@ -1,13 +1,27 @@
-telebot==0.0.5
+# Telegram bot
+pyTelegramBotAPI==4.12.0
+
+# Web server
 Flask==3.0.2
+
+# Data processing
 pandas==2.2.2
-requests==2.32.3
-pillow==10.3.0
 numpy==2.3.0
-beautifulsoup4==4.12.3
-lxml==5.2.1
+
+# HTTP & APIs
+requests==2.32.3
+httpx>=0.27.0
+
+# Market data providers
 ccxt==4.3.15
 yfinance==0.2.40
-httpx>=0.27.0
+
+# Image/chart generation
+pillow==10.3.0
+
+# Web scraping
+beautifulsoup4==4.12.3
+lxml==5.2.1
+
+# AI integration
 openai>=1.35.0
-pyTelegramBotAPI==4.12.0
