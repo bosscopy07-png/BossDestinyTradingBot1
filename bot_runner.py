@@ -5,7 +5,20 @@ import threading
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = telebot.TeleBot(BOT_TOKEN)
 
-def start_bot_polling():
+    def start_bot_polling():
+    try:
+        print("🧹 Stopping any old bot polling sessions...")
+        bot.stop_polling()  # ensures no double polling
+
+        @bot.message_handler(commands=["start"])
+        def start_message(message):
+            bot.reply_to(message, "🔥 Welcome to Boss Destiny Trading Empire!")
+
+        print("🤖 Telegram bot polling started.")
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    except Exception as e:
+        print(f"⚠️ Polling error: {e}")
+        bot.stop_polling()
     @bot.message_handler(commands=["start"])
     def start_message(message):
         bot.reply_to(message, "🔥 Welcome to Boss Destiny Trading Empire!\nUse /help to see available commands.")
