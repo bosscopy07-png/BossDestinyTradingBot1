@@ -271,4 +271,11 @@ def support_resistance(symbol, interval="1h", points=100, exchanges=None):
         df = fetch_klines_df_multi(symbol=symbol, exchange=exchanges[0], interval=interval, limit=points)
         pivot_high = df['high'].rolling(5, center=True).max()
         pivot_low = df['low'].rolling(5, center=True).min()
-        support = round(pivot_low.min(),
+        support = round(pivot_low.min(), 2)
+        resistance = round(pivot_high.max(), 2)
+        return {"support": support, "resistance": resistance}
+    except Exception as e:
+        # ✅ Proper logging with traceback
+        print(f"[support_resistance] Error for {symbol}: {e}")
+        traceback.print_exc()
+        return {"error": str(e)}
