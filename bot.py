@@ -9,6 +9,9 @@ from flask import Flask
 # Import helper functions from bot_runner
 from bot_runner import start_bot_polling, stop_existing_bot_instances
 
+if __name__ == "__main__":
+    start_bot_polling()
+
 # --- Flask setup (keeps Render port open) ---
 app = Flask(__name__)
 
