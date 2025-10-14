@@ -1,56 +1,36 @@
 # bot.py
 import os
-import sys
 import threading
-import time
+import traceback
+from datetime import datetime
+from flask import Flask
 
-# --- Ensure the working directory is correct ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(BASE_DIR)
+# Import helper functions from bot_runner
+from bot_runner import start_bot_polling, stop_existing_bot_instances
 
-# --- Safe import with debug info ---
-try:
-    import os
-from bot_runner import start_bot_polling, start_flask_app, stop_existing_bot_instances
+# --- Flask setup (keeps Render port open) ---
+app = Flask(__name__)
 
-# --- MAIN EXECUTION ---
+@app.route('/')
+def home():
+    return "🤖 Boss Destiny Trading Empire Bot is alive!"
+
+# --- Main run logic ---
 if __name__ == "__main__":
     try:
-        # Stop any old bot instance
+        print("Stopping any existing bot instances...")
         stop_existing_bot_instances()
 
-        # Start Flask (keeps Render port open)
-        start_flask_app()
+        print("Starting Telegram bot polling in background thread...")
+        bot_thread = threading.Thread(target=start_bot_polling)
+        bot_thread.start()
 
-        # Start Telegram bot in background
-        start_bot_polling()
+        print("Starting Flask server on port 8080...")
+        app.run(host="0.0.0.0", port=8080)
 
     except Exception as e:
-        print(f"❌ Error starting bot: {e}")
-
-if __name__ == "__main__":
-    stop_existing_bot_instances()
-    start_flask_app()  # Flask keeps Render port open
-    start_bot_polling()  # Bot runs in a background thread
-# --- Main runner ---
-def main():
-    print("🟢 Initializing trading bot system...")
-
-    # Stop any previous bot instances
-    stop_existing_bot_instances()
-
-    # Start Flask web app (for webhook or dashboard)
-    flask_thread = threading.Thread(target=start_flask_app, daemon=True)
-    flask_thread.start()
-    print("🌍 Flask app started in background.")
-
-    # Start Telegram bot polling
-    time.sleep(2)  # small delay to let Flask settle
-    start_bot_polling()
-
-if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=8080)
-    main()
+        error_msg = f"[{datetime.utcnow().isoformat()}] ERROR: {e}\n" + traceback.format_exc()
+        print(error_msg)
     # bot_runner.py
 import os
 import time
