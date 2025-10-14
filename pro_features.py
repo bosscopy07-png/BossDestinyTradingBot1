@@ -1,124 +1,201 @@
-# pro_features.py
-import os, time, traceback, json, requests
-from datetime import datetime, timedelta
-from market_providers import get_session
-from storage import load_data
+import os
+import time
+import traceback
+import json
+import requests
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from market_providers import get_session, fetch_klines_df_multi
 from ai_client import ai_analysis_text
 
-# QuickChart base
 QUICKCHART_URL = "https://quickchart.io/chart"
 
+# -------------------- TOP MOVERS --------------------
 def top_gainers_pairs(pairs=None, limit=5):
-    """
-    Return text list of top gainers/losers among provided pairs using Binance 24h ticker.
-    """
     if pairs is None:
         pairs = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT").split(",")
     try:
         sess = get_session()
-        r = sess.get("https://api.binance.com/api/v3/ticker/24hr", timeout=8); r.raise_for_status()
+        r = sess.get("https://api.binance.com/api/v3/ticker/24hr", timeout=10)
+        r.raise_for_status()
         tickers = r.json()
         rows = []
         for p in pairs:
-            t = next((x for x in tickers if x.get("symbol")==p), None)
+            t = next((x for x in tickers if x.get("symbol") == p), None)
             if t:
                 rows.append({
                     "symbol": p,
-                    "change": float(t.get("priceChangePercent",0)),
-                    "vol": float(t.get("quoteVolume",0))
+                    "change": float(t.get("priceChangePercent", 0)),
+                    "vol": float(t.get("quoteVolume", 0)),
+                    "lastPrice": float(t.get("lastPrice", 0))
                 })
         if not rows:
-            return "No data"
+            return "No data available."
         gainers = sorted(rows, key=lambda x: x["change"], reverse=True)[:limit]
         losers = sorted(rows, key=lambda x: x["change"])[:limit]
-        txt = "📈 Top Gainers:\n"
-        for g in gainers:
-            txt += f"{g['symbol']}: {g['change']:.2f}% vol:{int(g['vol']):,}\n"
-        txt += "\n📉 Top Losers:\n"
-        for g in losers:
-            txt += f"{g['symbol']}: {g['change']:.2f}% vol:{int(g['vol']):,}\n"
+        txt = "📈 Top Gainers:\n" + "\n".join(
+            f"{g['symbol']}: {g['change']:.2f}% | vol:{int(g['vol']):,} | price:{g['lastPrice']}" for g in gainers
+        )
+        txt += "\n\n📉 Top Losers:\n" + "\n".join(
+            f"{l['symbol']}: {l['change']:.2f}% | vol:{int(l['vol']):,} | price:{l['lastPrice']}" for l in losers
+        )
         return txt
     except Exception as e:
         traceback.print_exc()
         return f"Error fetching top movers: {e}"
 
+# -------------------- FEAR & GREED INDEX --------------------
 def fear_and_greed_index():
-    """Fetch Fear & Greed index from alternative.me"""
     try:
-        r = requests.get("https://api.alternative.me/fng/", timeout=8)
+        r = requests.get("https://api.alternative.me/fng/", timeout=10)
         r.raise_for_status()
         j = r.json()
         if "data" in j and j["data"]:
             val = int(j["data"][0]["value"])
             txt = j["data"][0]["value_classification"]
-            return f"😐 Fear & Greed: {val} — {txt}"
+            return f"😐 Fear & Greed Index: {val} — {txt}"
         return "F&G data unavailable"
     except Exception as e:
         traceback.print_exc()
         return f"Error fetching F&G: {e}"
 
-def quickchart_price_image(symbol, interval="1h", points=30):
-    """
-    Fetch recent close prices from market_providers and request quickchart image.
-    Returns (image_bytes or None, error_message or None)
-    """
-    from market_providers import fetch_klines_df, normalize_interval
-    try:
-        df = fetch_klines_df(symbol=symbol, interval=interval, limit=points)
-        closes = df["close"].tolist()[-points:]
-        labels = [str(i) for i in range(len(closes))]
-        chart_cfg = {
-            "type": "line",
-            "data": {"labels": labels, "datasets": [{"label": symbol, "data": closes, "fill": False}]},
-            "options": {"plugins":{"legend":{"display":False}},"scales":{"x":{"display":False}}}
-        }
-        params = {"c": json.dumps(chart_cfg), "width": 800, "height": 360, "devicePixelRatio":2}
-        r = requests.get(QUICKCHART_URL, params=params, timeout=15)
-        r.raise_for_status()
-        return r.content, None
-    except Exception as e:
-        traceback.print_exc()
-        return None, f"QuickChart error: {e}"
+# -------------------- MULTI-EXCHANGE PRICE --------------------
+def get_multi_exchange_price(symbol, exchanges=None):
+    if exchanges is None:
+        exchanges = ["binance", "bybit", "ftx", "kucoin", "okx"]
+    prices = {}
+    for ex in exchanges:
+        try:
+            df = fetch_klines_df_multi(symbol=symbol, exchange=ex, interval="1h", limit=1)
+            prices[ex] = df['close'].iloc[-1]
+        except Exception:
+            prices[ex] = None
+    avg_price = np.mean([p for p in prices.values() if p is not None])
+    return {"avg_price": avg_price, "prices": prices}
 
+# -------------------- TECHNICAL INDICATORS --------------------
+def compute_indicators(df):
+    df = df.copy()
+    df['SMA_10'] = df['close'].rolling(10).mean()
+    df['SMA_50'] = df['close'].rolling(50).mean()
+    df['EMA_20'] = df['close'].ewm(span=20, adjust=False).mean()
+
+    delta = df['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -1*delta.clip(upper=0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / avg_loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    ema12 = df['close'].ewm(span=12, adjust=False).mean()
+    ema26 = df['close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = ema12 - ema26
+    df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+    df['BB_upper'] = df['close'].rolling(20).mean() + 2*df['close'].rolling(20).std()
+    df['BB_lower'] = df['close'].rolling(20).mean() - 2*df['close'].rolling(20).std()
+    return df
+
+# -------------------- FUTURES SIGNAL --------------------
 def futures_leverage_suggestion(symbol, df=None):
-    """
-    Simple rule-of-thumb leverage suggestion based on volatility (std of returns).
-    Returns a dict {suggestion_str, recommended_leverage}
-    """
     try:
         if df is None:
-            from market_providers import fetch_klines_df
-            df = fetch_klines_df(symbol=symbol, interval="1h", limit=120)
-        returns = df["close"].pct_change().dropna()
-        vol = returns.std() * (24**0.5)  # rough dailyized volatility
-        # map vol to leverage: lower vol -> higher leverage, cap at 20x
-        if vol < 0.01:
+            df = fetch_klines_df_multi(symbol=symbol, exchange="binance", interval="1h", limit=120)
+        returns = df['close'].pct_change().dropna()
+        daily_vol = returns.std() * (24**0.5)
+        if daily_vol < 0.01:
             lev = 20
-        elif vol < 0.02:
+        elif daily_vol < 0.02:
             lev = 10
-        elif vol < 0.04:
+        elif daily_vol < 0.04:
             lev = 5
         else:
             lev = 2
-        suggestion = f"Estimated daily vol: {vol:.3f}. Recommended leverage: {lev}x (conservative)"
-        return {"vol": round(float(vol),5), "leverage": lev, "suggestion": suggestion}
+        return {"vol": round(daily_vol,5), "leverage": lev}
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
 
-def ai_market_brief_text(pairs=None):
-    """
-    Build a concise market brief prompt and get AI summary.
-    """
+def multi_exchange_futures_signal(symbol, exchanges=None):
     try:
-        if pairs is None:
-            pairs = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT").split(",")
-        summary = "Provide a concise 6-sentence market brief and one-line trading verdict (BUY/SELL/HOLD) for these pairs:\n"
-        for p in pairs:
-            summary += f"- {p}\n"
-        # call ai
-        resp = ai_analysis_text(summary)
-        return resp
+        data = get_multi_exchange_price(symbol, exchanges)
+        df = fetch_klines_df_multi(symbol=symbol, exchange=exchanges[0] if exchanges else "binance", interval="1h", limit=50)
+        df = compute_indicators(df)
+        last = df.iloc[-1]
+
+        signal_type = "HOLD"
+        if last['close'] > last['SMA_10'] and last['RSI'] < 70 and last['MACD'] > last['MACD_signal']:
+            signal_type = "LONG"
+        elif last['close'] < last['SMA_10'] and last['RSI'] > 30 and last['MACD'] < last['MACD_signal']:
+            signal_type = "SHORT"
+
+        entry = data['avg_price']
+        if signal_type == "LONG":
+            sl = entry * 0.995
+            tp = entry * 1.005
+        elif signal_type == "SHORT":
+            sl = entry * 1.005
+            tp = entry * 0.995
+        else:
+            sl = tp = None
+
+        leverage = futures_leverage_suggestion(symbol, df)['leverage']
+
+        return {
+            "symbol": symbol,
+            "signal": signal_type,
+            "entry": round(entry,2),
+            "SL": round(sl,2) if sl else None,
+            "TP1": round(tp,2) if tp else None,
+            "leverage": leverage,
+            "prices": data['prices']
+        }
     except Exception as e:
         traceback.print_exc()
-        return f"AI brief error: {e}"
+        return {"error": str(e)}
+
+# -------------------- CANDLESTICK PATTERN --------------------
+def detect_candle_pattern(symbol, interval="1h", points=50):
+    try:
+        df = fetch_klines_df_multi(symbol=symbol, exchange="binance", interval=interval, limit=points)
+        last_candle = df.iloc[-1]
+        body = abs(last_candle['close'] - last_candle['open'])
+        if last_candle['close'] > last_candle['open'] and body/last_candle['close'] > 0.005:
+            return "BULLISH"
+        elif last_candle['close'] < last_candle['open'] and body/last_candle['open'] > 0.005:
+            return "BEARISH"
+        return "HODL"
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
+
+# -------------------- SUPPORT & RESISTANCE --------------------
+def support_resistance(symbol, interval="1h", points=100):
+    try:
+        df = fetch_klines_df_multi(symbol=symbol, exchange="binance", interval=interval, limit=points)
+        pivot_high = df['high'].rolling(5, center=True).max()
+        pivot_low = df['low'].rolling(5, center=True).min()
+        support = round(pivot_low.min(), 2)
+        resistance = round(pivot_high.max(), 2)
+        return {"support": support, "resistance": resistance}
+    except Exception as e:
+        traceback.print_exc()
+        return {"error": str(e)}
+
+# -------------------- QUICKCHART --------------------
+def quickchart_price_image(symbol, interval="1h", points=30):
+    try:
+        df = fetch_klines_df_multi(symbol=symbol, exchange="binance", interval=interval, limit=points)
+        closes = df['close'].tolist()[-points:]
+        labels = [str(i + 1) for i in range(len(closes))]
+        chart_cfg = {
+            "type": "line",
+            "data": {"labels": labels, "datasets":[{"label":symbol,"data":closes,"fill":False,"borderColor":"blue"}]},
+            "options":{"plugins":{"legend":{"display":False}},"scales":{"x":{"display":True},"y":{"display":True}}}
+        }
+        params = {"c": json.dumps(chart_cfg), "width":800,"height":360,"devicePixelRatio":2}
+        r = requests.get(QUICKCHART_URL, params=params, timeout=15)
+        r.raise_for_status()
+        return r
