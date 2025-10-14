@@ -135,3 +135,32 @@ def start_bot_polling():
         traceback.print_exc()
         time.sleep(5)
         start_bot_polling()
+
+def stop_existing_bot_instances():
+    """Stops previous polling sessions to avoid 409 errors."""
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
+        requests.get(url, timeout=5)
+        logging.info("Previous bot instances stopped (if any).")
+    except Exception as e:
+        logging.warning(f"Could not stop existing bot instances: {e}")
+
+def start_bot_polling():
+    """Start polling safely with automatic retry."""
+    stop_existing_bot_instances()
+
+    while True:
+        try:
+            logging.info("Starting bot polling...")
+            bot.polling(none_stop=True, interval=1, timeout=20)
+        except telebot.apihelper.ApiTelegramException as e:
+            if "409" in str(e):
+                logging.warning("Conflict detected: another bot instance is running. Retrying in 5 seconds...")
+                stop_existing_bot_instances()
+                time.sleep(5)
+            else:
+                logging.error(f"Telegram API Exception: {e}")
+                time.sleep(5)
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            time.sleep(5)
