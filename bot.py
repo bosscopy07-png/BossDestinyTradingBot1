@@ -42,4 +42,4 @@ if __name__ == "__main__":
     # ✅ Run Flask only once (Render healthcheck)
     port = int(os.getenv("PORT", 8080))
     logging.info(f"[SERVER] Flask running on port {port}")
-    app.run(host="0.0.0.0", port=port, use_reloader=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), use_reloader=False)
