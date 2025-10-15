@@ -5,6 +5,10 @@ import traceback
 import requests
 import logging
 from datetime import datetime
+from bot import start_bot_polling  # OK, because bot.py no longer imports bot_runner
+
+if __name__ == "__main__":
+    start_bot_polling()
 
 from pro_features import (
     top_gainers_pairs,
