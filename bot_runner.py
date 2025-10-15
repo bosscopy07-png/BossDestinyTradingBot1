@@ -170,3 +170,12 @@ def start_bot_polling():
         except Exception as e:
             logging.error(f"Unexpected error: {e}")
             time.sleep(5)
+
+def start_bot_polling():
+    try:
+        print("Starting polling...")
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    except Exception:
+        traceback.print_exc()
+        time.sleep(5)
+        start_bot_polling()
