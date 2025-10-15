@@ -53,3 +53,8 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
     print(f"[SERVER] Starting Flask server on port {port}...")
     app.run(host="0.0.0.0", port=port)
+    
+# Polling function
+def start_bot_polling():
+    logging.info("Starting bot polling...")
+    bot.infinity_polling(timeout=60, long_polling_timeout=60)
