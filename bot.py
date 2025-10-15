@@ -3,10 +3,6 @@ import threading
 import time
 import traceback
 from flask import Flask, jsonify
-from bot import start_bot_polling  # OK, because bot.py no longer imports bot_runner
-
-if __name__ == "__main__":
-    start_bot_polling()
 
 # ---------------- FLASK HEALTH SERVER ----------------
 app = Flask("boss_destiny_health")
