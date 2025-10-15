@@ -24,7 +24,8 @@ def run_bot():
     while True:
         try:
             logging.info("[BOT] Starting Boss Destiny Trading Empire...")
-            bot_runner.start_bot_polling()  # 👈 this must be the function in your bot_runner.py
+            bot_runner.start_bot_polling()
+            logging.info("[BOT] Polling function exited unexpectedly")
         except Exception as e:
             logging.error(f"[BOT] Crashed: {e}")
             time.sleep(5)
