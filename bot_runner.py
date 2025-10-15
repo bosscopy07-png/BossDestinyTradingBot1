@@ -39,7 +39,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 ensure_storage()
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-_last_signal_time = {}  # cooldown tracker
+_last_signal_time = {}
 
 # ===== UTILITIES =====
 def can_send_signal(symbol):
@@ -77,10 +77,12 @@ def record_signal_and_send(sig_record, chat_id=None, user_id=None):
         f"Reasons: {', '.join(sig_record.get('reasons', [])) if sig_record.get('reasons') else 'None'}\n\n"
         f"— Boss Destiny Trading Empire"
     )
+
     img = build_signal_image(sig_record)
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("📸 Link PnL", callback_data=f"link_{sig_id}"))
     kb.add(types.InlineKeyboardButton("🤖 AI Details", callback_data=f"ai_{sig_id}"))
+
     safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
     return sig_id
 
@@ -109,30 +111,32 @@ def main_keyboard():
     return kb
 
 
-# ===== STOP / START BOT =====
+# ===== SAFE START =====
 def stop_existing_bot_instances():
-    """Stop other active getUpdates sessions (prevent 409 conflict)."""
+    """Stop any active getUpdates sessions to prevent 409 conflict."""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
         requests.get(url, timeout=5)
-        logging.info("Previous bot instances stopped successfully.")
+        logging.info("[BOT] Previous polling sessions stopped successfully.")
     except Exception as e:
-        logging.warning(f"Could not stop existing bot instances: {e}")
+        logging.warning(f"[BOT] Could not stop existing sessions: {e}")
 
 
 def start_bot_polling():
-    """Start polling safely with automatic retry."""
+    """Safely start polling — only one active session."""
     stop_existing_bot_instances()
-    while True:
-        try:
-            logging.info("[BOT] Starting polling loop...")
-            bot.infinity_polling(timeout=60, long_polling_timeout=60)
-        except Exception as e:
-            if "409" in str(e):
-                logging.warning("[BOT] Conflict (409): another instance running. Retrying...")
-                stop_existing_bot_instances()
-                time.sleep(5)
-            else:
-                logging.error(f"[BOT] Error: {e}")
-                traceback.print_exc()
-                time.sleep(5)
+    logging.info("[BOT] Starting Boss Destiny Trading Empire polling...")
+
+    try:
+        bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
+    except Exception as e:
+        if "409" in str(e):
+            logging.warning("[BOT] 409 Conflict detected — stopping other sessions and retrying.")
+            stop_existing_bot_instances()
+            time.sleep(5)
+            start_bot_polling()  # retry recursively
+        else:
+            logging.error(f"[BOT] Unexpected error: {e}")
+            traceback.print_exc()
+            time.sleep(10)
+            start_bot_polling()
