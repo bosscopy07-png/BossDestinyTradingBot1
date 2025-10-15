@@ -3,9 +3,7 @@ import threading
 import logging
 import time
 from flask import Flask, jsonify
-
-# ✅ Import your main bot logic here
-import bot_runner  # make sure your file name is bot_runner.py, not bot.runner.py
+import bot_runner  # 👈 make sure this is your actual bot logic file
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -23,23 +21,21 @@ def health_check():
 
 # ---------------- RUN BOT ----------------
 def run_bot():
-    """Start the bot safely in a loop."""
     while True:
         try:
             logging.info("[BOT] Starting Boss Destiny Trading Empire...")
-            bot_runner.start_bot_polling()
+            bot_runner.start_bot_polling()  # 👈 this must be the function in your bot_runner.py
         except Exception as e:
             logging.error(f"[BOT] Crashed: {e}")
             time.sleep(5)
 
 # ---------------- MAIN ENTRY POINT ----------------
 if __name__ == "__main__":
-    # ✅ Prevent Flask auto-reloader from launching a second process
-    if os.getenv("RUN_MAIN") != "true":
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
+    # Start Telegram bot thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
 
-    # ✅ Run Flask only once (Render healthcheck)
-    port = int(os.getenv("PORT", 8080))
+    # Keep Flask alive for Render  
+    port = int(os.getenv("PORT", 10000))
     logging.info(f"[SERVER] Flask running on port {port}")
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), use_reloader=False)
+    app.run(host="0.0.0.0", port=port, use_reloader=False)
