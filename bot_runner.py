@@ -215,9 +215,17 @@ def callback_handler(call):
             return
 
         if data == "trending":
-            txt = fetch_trending_pairs()
-            bot.send_message(cid, _append_brand(txt))
-            return
+    bot.send_message(cid, "📡 Fetching real-time multi-exchange data... please wait.")
+    try:
+        img_buf, caption = fetch_trending_pairs_branded(limit=10)
+        if img_buf:
+            safe_send_with_image(bot, cid, caption, img_buf)
+        else:
+            bot.send_message(cid, _append_brand(caption))
+    except Exception as e:
+        traceback.print_exc()
+        bot.send_message(cid, _append_brand(f"Failed to fetch trending pairs: {e}"))
+    return
 
         if data == "bot_status":
             bot.send_message(cid, _append_brand("⚙️ Bot is running ✅"))
