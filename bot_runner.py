@@ -110,19 +110,88 @@ def main_keyboard():
     )
     return kb
 
-# ===== COMMAND HANDLERS =====
-@bot.message_handler(commands=['start'])
-def handle_start(message):
-    welcome_text = (
-        "👋 Welcome to <b>Boss Destiny Trading Empire</b>!\n\n"
-        "🚀 I’m your AI-powered trading assistant.\n"
-        "Use the menu below to get signals, check top movers, and explore AI features."
-    )
+# ===== HANDLERS =====
+
+@bot.message_handler(commands=["start"])
+def start_cmd(message):
     bot.send_message(
         message.chat.id,
-        welcome_text,
+        f"👋 Welcome Boss Destiny!\n\nThis is your <b>Trading Empire</b> control panel.",
         reply_markup=main_keyboard()
     )
+
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    try:
+        bot.answer_callback_query(call.id)
+
+        if call.data == "get_signal":
+            bot.send_message(call.message.chat.id, "📈 Generating new trading signal...")
+            # you can call: signal = generate_signal() or similar
+
+        elif call.data == "scan_top4":
+            bot.send_message(call.message.chat.id, "🔎 Scanning top 4 market pairs...")
+
+        elif call.data == "bot_status":
+            bot.send_message(call.message.chat.id, "⚙️ Bot is running smoothly ✅")
+
+        elif call.data == "trending":
+            pairs = fetch_trending_pairs()
+            bot.send_message(call.message.chat.id, f"🚀 Trending pairs:\n{pairs}")
+
+        elif call.data == "market_news":
+            bot.send_message(call.message.chat.id, "📰 Latest market news coming soon...")
+
+        elif call.data == "challenge_status":
+            data = load_data()
+            balance = data.get("challenge", {}).get("balance", "N/A")
+            bot.send_message(call.message.chat.id, f"📊 Current Challenge Balance: {balance}")
+
+        elif call.data == "pnl_upload":
+            bot.send_message(call.message.chat.id, "📸 Please send your PnL screenshot...")
+
+        elif call.data == "history":
+            bot.send_message(call.message.chat.id, "🧾 Fetching signal history...")
+
+        elif call.data == "ask_ai":
+            bot.send_message(call.message.chat.id, "🤖 What would you like to ask the AI?")
+
+        elif call.data == "refresh_bot":
+            bot.send_message(call.message.chat.id, "🔄 Refreshing bot session...")
+            stop_existing_bot_instances()
+            time.sleep(3)
+            bot.send_message(call.message.chat.id, "✅ Bot refreshed successfully!")
+
+        elif call.data == "top_gainers":
+            gainers = top_gainers_pairs()
+            bot.send_message(call.message.chat.id, f"🚀 Top Gainers:\n{gainers}")
+
+        elif call.data == "fear_greed":
+            fg = fear_and_greed_index()
+            bot.send_message(call.message.chat.id, f"📈 Fear & Greed Index:\n{fg}")
+
+        elif call.data == "open_chart_menu":
+            bot.send_message(call.message.chat.id, "🖼️ Opening quick chart menu...")
+
+        elif call.data == "open_fut_menu":
+            bot.send_message(call.message.chat.id, "⚖️ Fetching futures suggestions...")
+            fut = futures_leverage_suggestion()
+            bot.send_message(call.message.chat.id, fut)
+
+        elif call.data == "start_auto_brief":
+            bot.send_message(call.message.chat.id, "▶️ Starting AI auto brief...")
+            start_scheduler(bot)
+
+        elif call.data == "stop_auto_brief":
+            bot.send_message(call.message.chat.id, "⏹ Stopping AI auto brief...")
+            stop_scheduler()
+
+        else:
+            bot.send_message(call.message.chat.id, f"⚠️ Unknown action: {call.data}")
+
+    except Exception as e:
+        logging.error(f"[CALLBACK ERROR] {e}")
+        traceback.print_exc()
 
 # ===== SAFE START =====
 def stop_existing_bot_instances():
