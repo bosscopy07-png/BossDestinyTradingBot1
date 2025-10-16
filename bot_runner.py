@@ -8,6 +8,14 @@ from datetime import datetime
 import telebot
 from telebot import types
 
+BRAND_TAG = "\n\n— <b>Boss Destiny Trading Empire</b>"
+
+def send_with_brand(chat_id, text, **kwargs):
+    """Send text messages with brand tag automatically."""
+    if BRAND_TAG.strip() not in text:
+        text += BRAND_TAG
+    bot.send_message(chat_id, text, **kwargs)
+
 # ===== IMPORT FEATURES =====
 from pro_features import (
     top_gainers_pairs,
