@@ -12,7 +12,8 @@ from telebot import types
 BRAND_TAG = "\n\n— <b>Boss Destiny Trading Empire</b>"
 
 # Feature modules (light-weight, provided below)
-from market_providers import fetch_klines_df, fetch_trending_pairs
+from market_providers import fetch_klines_df, fetch_trending_pairs_branded
+from image_utils import build_signal_image, safe_send_with_image, create_brand_image
 from signal_engine import generate_signal_for
 from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
 from ai_client import ai_analysis_text
