@@ -81,12 +81,12 @@ def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
     Ensures branding is included if image_buf is provided.
     """
     try:
-        if image_buf:
-            bot.send_photo(chat_id, image_buf, caption=text, reply_markup=reply_markup)
-        else:
-            bot.send_message(chat_id, text, reply_markup=reply_markup)
-    except Exception:
-        try:
-            bot.send_message(chat_id, text)
-        except:
-            pass
+        BRAND_FOOTER = "\n\n— <b>Boss Destiny Trading Empire</b>"
+if image_buf:
+    if BRAND_FOOTER.strip() not in text:
+        text += BRAND_FOOTER
+    bot.send_photo(chat_id, image_buf, caption=text, reply_markup=reply_markup)
+else:
+    if BRAND_FOOTER.strip() not in text:
+        text += BRAND_FOOTER
+    bot.send_message(chat_id, text, reply_markup=reply_markup)
