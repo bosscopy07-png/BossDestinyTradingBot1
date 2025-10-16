@@ -110,6 +110,19 @@ def main_keyboard():
     )
     return kb
 
+# ===== COMMAND HANDLERS =====
+@bot.message_handler(commands=['start'])
+def handle_start(message):
+    welcome_text = (
+        "👋 Welcome to <b>Boss Destiny Trading Empire</b>!\n\n"
+        "🚀 I’m your AI-powered trading assistant.\n"
+        "Use the menu below to get signals, check top movers, and explore AI features."
+    )
+    bot.send_message(
+        message.chat.id,
+        welcome_text,
+        reply_markup=main_keyboard()
+    )
 
 # ===== SAFE START =====
 def stop_existing_bot_instances():
