@@ -108,3 +108,86 @@ def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
             bot.send_message(chat_id, f"⚠️ Failed to send image/text: {e}\n\n{text}", reply_markup=reply_markup)
         except Exception:
             pass
+
+# ===============================
+# Multi-Exchange Klines Fetcher
+# ===============================
+def fetch_klines_multi(symbols, interval="1h", limit=100):
+    """
+    Fetch OHLCV (candlestick) data for multiple symbols across Binance, Bybit, KuCoin, and OKX.
+    Returns a dict: {symbol: DataFrame}
+    """
+    results = {}
+    s = get_session()
+
+    for sym in symbols:
+        klines_data = []
+
+        # Binance
+        try:
+            url = f"https://api.binance.com/api/v3/klines"
+            params = {"symbol": sym, "interval": interval, "limit": limit}
+            r = s.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "_", "_", "_", "_", "_", "_"
+            ])
+            df["exchange"] = "Binance"
+            klines_data.append(df[["open_time", "open", "high", "low", "close", "volume", "exchange"]])
+        except Exception as e:
+            print(f"[WARN] Binance klines failed for {sym}: {e}")
+
+        # Bybit
+        try:
+            url = f"https://api.bybit.com/v5/market/kline"
+            params = {"category": "spot", "symbol": sym, "interval": interval, "limit": limit}
+            r = s.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json().get("result", {}).get("list", [])
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume", "_"
+            ])
+            df["exchange"] = "Bybit"
+            klines_data.append(df[["open_time", "open", "high", "low", "close", "volume", "exchange"]])
+        except Exception as e:
+            print(f"[WARN] Bybit klines failed for {sym}: {e}")
+
+        # KuCoin
+        try:
+            url = f"https://api.kucoin.com/api/v1/market/candles"
+            params = {"symbol": sym, "type": interval}
+            r = s.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "close", "high", "low", "volume", "_"
+            ])
+            df["exchange"] = "KuCoin"
+            klines_data.append(df[["open_time", "open", "high", "low", "close", "volume", "exchange"]])
+        except Exception as e:
+            print(f"[WARN] KuCoin klines failed for {sym}: {e}")
+
+        # OKX
+        try:
+            url = f"https://www.okx.com/api/v5/market/candles"
+            params = {"instId": sym, "bar": interval, "limit": limit}
+            r = s.get(url, params=params, timeout=8)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume", "_"
+            ])
+            df["exchange"] = "OKX"
+            klines_data.append(df[["open_time", "open", "high", "low", "close", "volume", "exchange"]])
+        except Exception as e:
+            print(f"[WARN] OKX klines failed for {sym}: {e}")
+
+        # Merge data if available
+        if klines_data:
+            results[sym] = pd.concat(klines_data, ignore_index=True)
+        else:
+            results[sym] = pd.DataFrame()
+
+    return results
