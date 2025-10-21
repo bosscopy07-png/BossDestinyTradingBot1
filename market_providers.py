@@ -5,8 +5,10 @@ import pandas as pd
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from io import BytesIO
+import matplotlib.pyplot as plt
 
-# ✅ Import your brand image generator
+# ✅ Import brand image generator
 from image_utils import create_brand_image
 
 # ===============================
@@ -22,7 +24,7 @@ OKX_TICKER = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
 # ===============================
 def get_session():
     s = requests.Session()
-    s.headers.update({"User-Agent": "BossDestiny/1.0"})
+    s.headers.update({"User-Agent": "BossDestinyBot/2.0"})
     proxy = os.getenv("PROXY_URL")
     if proxy:
         s.proxies.update({"http": proxy, "https": proxy})
@@ -98,47 +100,152 @@ def fetch_okx_pairs():
         })
     return pd.DataFrame(rows)
 
-
 # ===============================
-# Multi-Exchange Trending (Branded)
+# Combined & Trending Analysis
 # ===============================
-def fetch_trending_pairs_branded(limit=10):
-    """Return a Boss Destiny–branded trending pairs image."""
+def fetch_all_pairs():
+    """Combine data from all exchanges safely."""
     dfs = []
-    for f in [fetch_binance_pairs, fetch_bybit_pairs, fetch_kucoin_pairs, fetch_okx_pairs]:
+    for fetcher in [fetch_binance_pairs, fetch_bybit_pairs, fetch_kucoin_pairs, fetch_okx_pairs]:
         try:
-            dfs.append(f())
+            dfs.append(fetcher())
         except Exception as e:
-            print(f"[WARN] {f.__name__} failed: {e}")
-            traceback.print_exc()
-            continue
-
+            print(f"⚠️ Error fetching from {fetcher.__name__}: {e}")
     if not dfs:
-        return None, "⚠️ All exchanges failed to respond."
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
 
-    df = pd.concat(dfs, ignore_index=True)
-    df = df[df["volume"] > 0]
-    df = df.sort_values("priceChangePercent", ascending=False).head(limit)
 
-    lines = [f"🔥 Multi-Exchange Trending Pairs ({len(df)} top picks)"]
-    for _, row in df.iterrows():
-        lines.append(
-            f"{row['symbol']:<10} | {row['priceChangePercent']:+.2f}% | Vol: {int(row['volume']):,} | {row['exchange']}"
-        )
+def get_trending_pairs(top_n=10):
+    """Rank top and bottom movers by percentage change."""
+    df = fetch_all_pairs()
+    if df.empty:
+        return None, None
 
-    # Create branded image
-    img_buf = create_brand_image(lines)
-    return img_buf, "Top Multi-Exchange Trending Pairs"
+    df = df.sort_values("priceChangePercent", ascending=False)
+    top_gainers = df.head(top_n).reset_index(drop=True)
+    top_losers = df.tail(top_n).reset_index(drop=True)
+    return top_gainers, top_losers
+
+
+def fetch_trending_pairs_branded(top_n=10):
+    """Return image + text summary for Telegram."""
+    top_gainers, top_losers = get_trending_pairs(top_n)
+    if top_gainers is None:
+        return None, "⚠️ Failed to fetch trending pairs."
+
+    # Prepare message
+    msg = "📈 **Top Gainers (24h)**\n"
+    for _, row in top_gainers.iterrows():
+        msg += f"{row['symbol']}: +{row['priceChangePercent']:.2f}%  | 💰 Vol: {row['volume']:.0f} ({row['exchange']})\n"
+
+    msg += "\n📉 **Top Losers (24h)**\n"
+    for _, row in top_losers.iterrows():
+        msg += f"{row['symbol']}: {row['priceChangePercent']:.2f}%  | 💰 Vol: {row['volume']:.0f} ({row['exchange']})\n"
+
+    # Create branded chart image
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.barh(top_gainers["symbol"], top_gainers["priceChangePercent"], color="green", label="Gainers")
+    ax.barh(top_losers["symbol"], top_losers["priceChangePercent"], color="red", label="Losers")
+    ax.set_xlabel("% Change")
+    ax.set_title("Top Gainers & Losers (24h)")
+    ax.legend()
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png", dpi=200)
+    buf.seek(0)
+    plt.close(fig)
+
+    # Add brand overlay
+    branded_img = create_brand_image(buf, title="Market Movers", subtitle="by BossDestinyBot 🚀")
+
+    return branded_img, msg
 
 
 # ===============================
-# Standalone Test
+# Kline (Chart Data) – Multi-Exchange
 # ===============================
-if __name__ == "__main__":
-    img_buf, caption = fetch_trending_pairs_branded(10)
-    if img_buf:
-        with open("trending_pairs.png", "wb") as f:
-            f.write(img_buf.getbuffer())
-        print("✅ Branded trending pairs image saved as trending_pairs.png")
-    else:
-        print("❌ Failed to generate trending pairs image")
+
+def fetch_klines_binance(symbol, interval="1h", limit=100):
+    """Fetch klines from Binance."""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    df = pd.DataFrame(data, columns=[
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_asset_volume", "trades",
+        "taker_buy_base", "taker_buy_quote", "ignore"
+    ])
+    df[["open", "high", "low", "close", "volume"]] = df[
+        ["open", "high", "low", "close", "volume"]
+    ].astype(float)
+    return df
+
+
+def fetch_klines_bybit(symbol, interval="60", limit=100):
+    """Fetch klines from Bybit."""
+    url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={symbol}&interval={interval}&limit={limit}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json().get("result", {}).get("list", [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data, columns=["open_time", "open", "high", "low", "close", "volume", "turnover"])
+    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+    return df
+
+
+def fetch_klines_kucoin(symbol, interval="1hour", limit=100):
+    """Fetch klines from KuCoin."""
+    url = f"https://api.kucoin.com/api/v1/market/candles?type={interval}&symbol={symbol}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data, columns=["time", "open", "close", "high", "low", "volume", "turnover"])
+    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+    return df
+
+
+def fetch_klines_okx(symbol, interval="1H", limit=100):
+    """Fetch klines from OKX."""
+    url = f"https://www.okx.com/api/v5/market/candles?instId={symbol}&bar={interval}&limit={limit}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    data = r.json().get("data", [])
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data, columns=["open_time", "open", "high", "low", "close", "volume"])
+    df[["open", "high", "low", "close", "volume"]] = df[["open", "high", "low", "close", "volume"]].astype(float)
+    return df
+
+
+def fetch_klines_multi(symbols, interval="1h", limit=100):
+    """
+    Fetch klines from multiple exchanges for multiple symbols.
+    Auto-fallback between Binance, Bybit, KuCoin, and OKX.
+    """
+    klines_data = {}
+    for symbol in symbols:
+        fetched = False
+        for fetcher in [
+            ("Binance", fetch_klines_binance),
+            ("Bybit", fetch_klines_bybit),
+            ("KuCoin", fetch_klines_kucoin),
+            ("OKX", fetch_klines_okx)
+        ]:
+            exchange, func = fetcher
+            try:
+                df = func(symbol, interval=interval, limit=limit)
+                if not df.empty:
+                    klines_data[symbol] = {"exchange": exchange, "data": df}
+                    fetched = True
+                    break
+            except Exception as e:
+                print(f"⚠️ {exchange} klines failed for {symbol}: {e}")
+        if not fetched:
+            klines_data[symbol] = {"exchange": None, "data": pd.DataFrame()}
+    return klines_data
