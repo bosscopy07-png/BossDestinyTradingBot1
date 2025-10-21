@@ -7,7 +7,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 # ✅ Import your brand image generator
-from Images import create_brand_image
+from image_utils import create_brand_image
 
 # ===============================
 # API ENDPOINTS
