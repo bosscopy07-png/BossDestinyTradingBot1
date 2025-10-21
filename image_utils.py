@@ -82,11 +82,22 @@ def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
     """
     try:
         BRAND_FOOTER = "\n\n— <b>Boss Destiny Trading Empire</b>"
-if image_buf:
-    if BRAND_FOOTER.strip() not in text:
-        text += BRAND_FOOTER
-    bot.send_photo(chat_id, image_buf, caption=text, reply_markup=reply_markup)
-else:
-    if BRAND_FOOTER.strip() not in text:
-        text += BRAND_FOOTER
-    bot.send_message(chat_id, text, reply_markup=reply_markup)
+def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
+    """Safely send photo if available, otherwise text — always with brand footer."""
+    try:
+        # Append brand footer once
+        if BRAND_FOOTER.strip() not in text:
+            text += BRAND_FOOTER
+
+        if image_buf:
+            bot.send_photo(chat_id, image_buf, caption=text, reply_markup=reply_markup)
+        else:
+            bot.send_message(chat_id, text, reply_markup=reply_markup)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        try:
+            bot.send_message(chat_id, f"⚠️ Failed to send image/text: {e}\n\n{text}", reply_markup=reply_markup)
+        except Exception:
+            pass
