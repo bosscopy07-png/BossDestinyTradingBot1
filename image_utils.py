@@ -1,17 +1,22 @@
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
 
+# ===============================
+# Branding Configuration
+# ===============================
 BRAND = "Boss Destiny Trading Empire"
 BRAND_COLOR = (255, 200, 0)
 BACKGROUND_COLOR = (12, 14, 20)
 TEXT_COLOR = (230, 230, 230)
 WIDTH, HEIGHT = 900, 360
 PADDING = 20
+BRAND_FOOTER = "\n\n— <b>Boss Destiny Trading Empire</b>"
 
+# ===============================
+# Font Loader
+# ===============================
 def _get_font(size=18, bold=False):
-    """
-    Load DejaVuSans font, fallback to default if unavailable.
-    """
+    """Load DejaVuSans font, fallback to default if unavailable."""
     try:
         if bold:
             return ImageFont.truetype("DejaVuSans-Bold.ttf", size=size)
@@ -19,6 +24,9 @@ def _get_font(size=18, bold=False):
     except Exception:
         return ImageFont.load_default()
 
+# ===============================
+# Brand Image Generator
+# ===============================
 def create_brand_image(lines, chart_img=None):
     """
     Create a professional branded image with optional chart.
@@ -61,6 +69,9 @@ def create_brand_image(lines, chart_img=None):
     buf.seek(0)
     return buf
 
+# ===============================
+# Signal Image Builder
+# ===============================
 def build_signal_image(sig, chart_img=None):
     """
     Build a professional signal image from a signal dictionary.
@@ -75,13 +86,9 @@ def build_signal_image(sig, chart_img=None):
     ]
     return create_brand_image(lines, chart_img=chart_img)
 
-def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
-    """
-    Safely send a message or photo on Telegram with fallback.
-    Ensures branding is included if image_buf is provided.
-    """
-    try:
-        BRAND_FOOTER = "\n\n— <b>Boss Destiny Trading Empire</b>"
+# ===============================
+# Safe Send Helper (Telegram)
+# ===============================
 def safe_send_with_image(bot, chat_id, text, image_buf=None, reply_markup=None):
     """Safely send photo if available, otherwise text — always with brand footer."""
     try:
