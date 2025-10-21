@@ -25,3 +25,5 @@ lxml==5.2.1
 
 # AI integration
 openai>=1.35.0
+
+matplotlib
