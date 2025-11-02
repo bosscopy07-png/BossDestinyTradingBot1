@@ -5,7 +5,7 @@ import threading
 import traceback
 import requests
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import telebot
 from telebot import types
 
@@ -16,15 +16,15 @@ BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot 💎</b>"
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT").split(",")
-# scan all timeframes per your request:
+# scan all timeframes per requirement:
 SCAN_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
 SIGNAL_INTERVAL_DEFAULT = os.getenv("SIGNAL_INTERVAL", "1h")
 COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
 CHALLENGE_START = float(os.getenv("CHALLENGE_START", "100.0"))
-# Auto-send parameters you confirmed:
-AUTO_CONFIDENCE_THRESHOLD = 0.90   # 90%
-AUTO_SEND_ONLY_ADMIN = True        # send to admin only
+# Auto-send parameters:
+AUTO_CONFIDENCE_THRESHOLD = float(os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90"))   # 0.90 = 90%
+AUTO_SEND_ONLY_ADMIN = True        # send to admin only (as requested)
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable required")
@@ -32,12 +32,10 @@ if not BOT_TOKEN:
 # ----- Logging & storage init -----
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Import your project modules (must exist)
-# They should provide the functions used below.
+# Import optional project modules (if missing we fallback gracefully)
 try:
     from market_providers import fetch_trending_pairs_branded, fetch_klines_multi, get_session, fetch_trending_pairs_text
 except Exception:
-    # fallback placeholders if not present (so import error surfaces later more gracefully)
     fetch_trending_pairs_branded = None
     fetch_klines_multi = None
     get_session = None
@@ -74,15 +72,15 @@ except Exception:
     fear_and_greed_index = None
     futures_leverage_suggestion = None
 
-# Ensure storage exists (if module present)
-try:
-    if ensure_storage:
+# ensure storage directory/data if module available
+if ensure_storage:
+    try:
         ensure_storage()
-except Exception:
-    logging.warning("Could not run ensure_storage(): module missing or raised error.")
+    except Exception:
+        logging.exception("ensure_storage failed")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-_last_signal_time = {}  # dict mapping (symbol, interval) -> datetime of last auto-send
+_last_signal_time = {}  # dict mapping (symbol|interval) -> datetime of last auto-send
 _scanner_thread = None
 _scanner_stop_event = threading.Event()
 
@@ -93,7 +91,7 @@ def _append_brand(text: str) -> str:
     return text
 
 def stop_existing_bot_instances():
-    """Try to clear pending getUpdates sessions to reduce 409 conflicts."""
+    """Try clear pending getUpdates sessions to reduce 409 conflicts."""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
         requests.get(url, timeout=5)
@@ -135,7 +133,7 @@ def _safe_generate_signal(symbol: str, interval: str):
 # ----- recording & messaging -----
 def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
     """Record a signal in storage and send it (image + caption)."""
-    # storage
+    # storage read
     try:
         d = load_data() if load_data else {}
     except Exception:
@@ -143,10 +141,13 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
 
     sig_id = f"S{int(time.time())}"
     balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
+
     # risk and pos
-    risk_amt, pos_size = compute_risk_and_size(sig.get("entry") or sig.get("entry", 0),
-                                               sig.get("sl") or sig.get("sl", 0),
-                                               balance, RISK_PERCENT)
+    risk_amt, pos_size = compute_risk_and_size(
+        sig.get("entry") or sig.get("entry", 0),
+        sig.get("sl") or sig.get("sl", 0),
+        balance, RISK_PERCENT
+    )
 
     rec = {
         "id": sig_id,
@@ -158,6 +159,7 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
         "auto": bool(auto)
     }
 
+    # save record
     try:
         if isinstance(d, dict):
             d.setdefault("signals", []).append(rec)
@@ -195,7 +197,6 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("📸 Link PnL", callback_data=f"link_{sig_id}"))
     kb.add(types.InlineKeyboardButton("🤖 AI Details", callback_data=f"ai_{sig_id}"))
-    # allow quick share inline
     kb.add(types.InlineKeyboardButton("🔁 Share", switch_inline_query=f"{sig.get('symbol')}"))
 
     # send (use safe_send_with_image if available)
@@ -203,7 +204,6 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
         if safe_send_with_image:
             safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
         else:
-            # fallback
             if img:
                 bot.send_photo(chat_id or ADMIN_ID, img, caption=caption, reply_markup=kb)
             else:
@@ -246,9 +246,11 @@ def main_keyboard():
 @bot.message_handler(commands=['start', 'menu'])
 def cmd_start(msg):
     try:
-        bot.send_message(msg.chat.id,
-                         _append_brand("👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."),
-                         reply_markup=main_keyboard())
+        bot.send_message(
+            msg.chat.id,
+            _append_brand("👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."),
+            reply_markup=main_keyboard()
+        )
     except Exception:
         logging.exception("cmd_start failed")
 
@@ -258,7 +260,7 @@ def photo_handler(message):
         fi = bot.get_file(message.photo[-1].file_id)
         data = bot.download_file(fi.file_path)
         if record_pnl_screenshot:
-            fname = record_pnl_screenshot(data, datetime.utcnow().strftime("%Y%m%d_%H%M%S"), message.from_user.id, message.caption)
+            record_pnl_screenshot(data, datetime.utcnow().strftime("%Y%m%d_%H%M%S"), message.from_user.id, message.caption)
         bot.reply_to(message, _append_brand("Saved screenshot. Reply with `#link <signal_id> TP1` or `#link <signal_id> SL`"))
     except Exception:
         logging.exception("photo_handler failed")
@@ -298,13 +300,14 @@ def link_handler(message):
         logging.exception("link_handler failed")
         bot.reply_to(message, _append_brand("Failed to link screenshot."))
 
-# Callback actions
+# ----- Callback actions -----
 @bot.callback_query_handler(func=lambda call: True)
 def callback_handler(call):
     try:
         cid = call.message.chat.id
         data = call.data
         bot.answer_callback_query(call.id)
+
         # Choose pair -> produce inline keyboard of PAIRS
         if data == "get_signal":
             kb = types.InlineKeyboardMarkup()
@@ -321,7 +324,6 @@ def callback_handler(call):
             if sig.get("error"):
                 bot.send_message(cid, _append_brand(f"Error generating signal: {sig['error']}"))
                 return
-            # show to the requester
             record_signal_and_send(sig, chat_id=cid, user_id=call.from_user.id, auto=False)
             return
 
@@ -416,50 +418,41 @@ def callback_handler(call):
 # ----- Background scanner (auto-detect strong signals) -----
 def _scanner_loop():
     """
-    Runs forever until stop event set. Scans multiple timeframes & pairs.
-    When it finds a signal >= AUTO_CONFIDENCE_THRESHOLD, sends only to admin (per your request)
+    Runs until stop event set. Scans multiple timeframes & pairs.
+    When it finds a strong signal >= AUTO_CONFIDENCE_THRESHOLD, sends only to admin
     and marks cooldown for that symbol+interval.
     """
-    logging.info("[SCANNER] Background scanner started (scanning multiple TFs).")
-    # continuous loop
+    logging.info("[SCANNER] Background scanner started (multi-TF).")
     while not _scanner_stop_event.is_set():
         try:
-            # iterate timeframes and pairs
             for interval in SCAN_INTERVALS:
                 if _scanner_stop_event.is_set():
                     break
                 for pair in PAIRS:
                     if _scanner_stop_event.is_set():
                         break
-                    # check cooldown
+                    # respect cooldown per pair+TF
                     if not can_send_signal(pair, interval):
                         continue
 
                     sig = _safe_generate_signal(pair, interval)
                     if sig.get("error"):
-                        # skip this pair
                         continue
 
-                    # signal type: prefer LONG/SHORT (your engine returns LONG/SHORT/HOLD)
                     s_type = sig.get("signal")
                     conf = float(sig.get("confidence", 0.0)) if sig.get("confidence") is not None else 0.0
 
-                    # check confidence threshold
                     if s_type in ("LONG", "SHORT") and conf >= AUTO_CONFIDENCE_THRESHOLD:
-                        # mark and send only to admin
                         try:
                             mark_signal_sent(pair, interval)
-                            # send to admin only
                             target = ADMIN_ID if AUTO_SEND_ONLY_ADMIN and ADMIN_ID else None
                             record_signal_and_send(sig, chat_id=target, user_id=ADMIN_ID, auto=True)
                             logging.info("[SCANNER] Auto-sent strong signal for %s %s conf=%.2f", pair, interval, conf)
                         except Exception:
                             logging.exception("Failed to record/send auto signal")
-                    # small sleep between pair checks to avoid API rate issues
+                    # mild throttle to avoid rate limits
                     time.sleep(0.6)
-            # after a full pass, brief rest to avoid 100% CPU; allow responsive stopping
-            # scan continuously — your "all timeframes" requirement: loop without huge pause
-            # small sleep to yield, but scanner is effectively continuous
+            # small pause between full cycles so the system can breathe
             time.sleep(2.0)
         except Exception:
             logging.exception("Unhandled error in scanner loop")
@@ -472,4 +465,33 @@ def start_background_scanner():
         logging.info("[SCANNER] Already running.")
         return
     _scanner_stop_event.clear()
-    _scanner_thread = threading.Thread(target=_sca
+    _scanner_thread = threading.Thread(target=_scanner_loop, daemon=True)
+    _scanner_thread.start()
+    logging.info("[SCANNER] Started background scanner thread.")
+
+def stop_background_scanner():
+    global _scanner_thread, _scanner_stop_event
+    if not _scanner_thread:
+        logging.info("[SCANNER] Not running.")
+        return
+    _scanner_stop_event.set()
+    _scanner_thread.join(timeout=5)
+    _scanner_thread = None
+    logging.info("[SCANNER] Stop requested and thread joined.")
+
+# ----- Start polling safely (exported) -----
+def start_bot_polling():
+    stop_existing_bot_instances()
+    logging.info("[BOT] Starting polling loop...")
+    while True:
+        try:
+            bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
+        except Exception as e:
+            logging.error("[BOT] Polling loop exception: %s", e)
+            if "409" in str(e):
+                logging.warning("[BOT] 409 Conflict - attempting to stop other sessions and retry")
+                stop_existing_bot_instances()
+                time.sleep(5)
+            else:
+                time.sleep(5)
+                
