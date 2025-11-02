@@ -1,13 +1,13 @@
+# signal_engine.py
 import os
 import traceback
 from datetime import datetime
+from math import isfinite
 import numpy as np
 import pandas as pd
-from market_providers import fetch_klines_multi as fetch_klines_df
+from market_providers import fetch_klines_multi
 
-# ======================================================
-# CORE INDICATORS
-# ======================================================
+# ---------- indicators ----------
 def ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -38,29 +38,35 @@ def bollinger_bands(series, period=20, std_factor=2):
     lower = sma_val - std_factor * std
     return upper, lower
 
-
-# ======================================================
-# ADVANCED SIGNAL GENERATION
-# ======================================================
+# ---------- main generator ----------
 def generate_signal(symbol="BTCUSDT", interval="1h"):
-    """Enhanced adaptive trading signal generator"""
+    """
+    Return a signal dict with: symbol, interval, signal(LONG/SHORT/HOLD), entry, sl, tp1, confidence, reasons
+    Uses multi-exchange public data (defaults to binance).
+    """
     try:
-        df = fetch_klines_df(symbol, interval, limit=300)
+        df = fetch_klines_multi(symbol=symbol, interval=interval, limit=500, exchange="binance")
         if df is None or len(df) < 30:
             return {"error": "Insufficient data for signal generation"}
 
-        # --- Dynamic Settings ---
+        # config
         fast_ema = int(os.getenv("EMA_FAST", "9"))
         slow_ema = int(os.getenv("EMA_SLOW", "21"))
         rsi_period = int(os.getenv("RSI_PERIOD", "14"))
         bb_period = int(os.getenv("BB_PERIOD", "20"))
         bb_std = float(os.getenv("BB_STD", "2"))
 
-        # --- Compute Indicators ---
+        df["close"] = df["close"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["high"] = df["high"].astype(float)
+
         df["ema_fast"] = ema(df["close"], fast_ema)
         df["ema_slow"] = ema(df["close"], slow_ema)
         df["rsi"] = rsi(df["close"], rsi_period)
-        df["macd"], df["macd_signal"], df["macd_hist"] = macd(df["close"])
+        macd_val, macd_sig, macd_hist = macd(df["close"])
+        df["macd"] = macd_val
+        df["macd_signal"] = macd_sig
+        df["macd_hist"] = macd_hist
         df["bb_upper"], df["bb_lower"] = bollinger_bands(df["close"], bb_period, bb_std)
 
         last = df.iloc[-1]
@@ -70,108 +76,70 @@ def generate_signal(symbol="BTCUSDT", interval="1h"):
         reasons = []
         score = 0.5
 
-        # --- EMA Cross ---
+        # EMA cross
         if prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]:
             signal = "LONG"
-            reasons.append("EMA crossover (bullish)")
-            score += 0.25
+            reasons.append("EMA cross up")
+            score += 0.14
         elif prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]:
             signal = "SHORT"
-            reasons.append("EMA crossover (bearish)")
-            score += 0.25
+            reasons.append("EMA cross down")
+            score += 0.14
 
-        # --- MACD Confirmation ---
+        # MACD
         if last["macd_hist"] > 0 and signal == "LONG":
-            score += 0.1
-            reasons.append("MACD supports bullish momentum")
-        elif last["macd_hist"] < 0 and signal == "SHORT":
-            score += 0.1
-            reasons.append("MACD supports bearish momentum")
+            score += 0.08; reasons.append("MACD positive")
+        if last["macd_hist"] < 0 and signal == "SHORT":
+            score += 0.08; reasons.append("MACD negative")
 
-        # --- RSI Logic ---
-        rsi_val = float(last["rsi"])
-        if rsi_val > 80:
-            reasons.append("Overbought RSI")
-            if signal == "LONG": score -= 0.1
-        elif rsi_val < 20:
-            reasons.append("Oversold RSI")
-            if signal == "SHORT": score -= 0.1
+        # RSI sanity
+        r = float(last["rsi"])
+        if signal == "LONG" and r > 80:
+            reasons.append("High RSI - caution"); score -= 0.08
+        if signal == "SHORT" and r < 20:
+            reasons.append("Low RSI - caution"); score -= 0.08
 
-        # --- Bollinger Bounce ---
+        # Bollinger context
         if signal == "LONG" and last["close"] < last["bb_lower"]:
-            score += 0.05
-            reasons.append("Price near lower BB (potential rebound)")
+            reasons.append("Price near lower BB"); score += 0.03
         if signal == "SHORT" and last["close"] > last["bb_upper"]:
-            score += 0.05
-            reasons.append("Price near upper BB (potential pullback)")
+            reasons.append("Price near upper BB"); score += 0.03
 
-        # --- Volatility Awareness ---
-        atr = (df["high"] - df["low"]).rolling(14).mean().iloc[-1]
-        volatility = (atr / last["close"]) * 100
-        if volatility < 1.0:
-            reasons.append("Low volatility environment — weak momentum")
-            score -= 0.05
-        elif volatility > 5.0:
-            reasons.append("High volatility — signals may be unstable")
-            score -= 0.03
-
-        # --- Multi-Timeframe Confirmation ---
-        try:
-            higher_tf = {"15m": "1h", "1h": "4h", "4h": "1d"}.get(interval, "4h")
-            df_htf = fetch_klines_df(symbol, higher_tf, limit=200)
-            if df_htf is not None and len(df_htf) > 50:
-                df_htf["ema_fast"] = ema(df_htf["close"], fast_ema)
-                df_htf["ema_slow"] = ema(df_htf["close"], slow_ema)
-                last_htf = df_htf.iloc[-1]
-                if last_htf["ema_fast"] > last_htf["ema_slow"] and signal == "LONG":
-                    score += 0.15
-                    reasons.append(f"Higher timeframe ({higher_tf}) confirms uptrend")
-                elif last_htf["ema_fast"] < last_htf["ema_slow"] and signal == "SHORT":
-                    score += 0.15
-                    reasons.append(f"Higher timeframe ({higher_tf}) confirms downtrend")
-                else:
-                    reasons.append(f"Higher timeframe ({higher_tf}) neutral")
-        except Exception:
-            reasons.append("Higher timeframe confirmation skipped")
-
-        # --- Price Levels ---
         price = float(last["close"])
         if signal == "LONG":
             sl = float(df["low"].iloc[-3])
-            tp1 = price + (price - sl) * (1.5 if volatility < 3 else 1.2)
+            tp1 = price + (price - sl) * 1.5
         elif signal == "SHORT":
             sl = float(df["high"].iloc[-3])
-            tp1 = price - (sl - price) * (1.5 if volatility < 3 else 1.2)
+            tp1 = price - (sl - price) * 1.5
         else:
             sl = price * 0.995
             tp1 = price * 1.005
 
-        # --- Risk Management ---
+        # risk sizing
         try:
             from storage import load_data
             d = load_data()
-            balance = d.get("challenge", {}).get("balance", float(os.getenv("CHALLENGE_START", "10")))
+            balance = d.get("challenge", {}).get("balance", float(os.getenv("CHALLENGE_START", "100.0")))
         except Exception:
-            balance = float(os.getenv("CHALLENGE_START", "10"))
+            balance = float(os.getenv("CHALLENGE_START", "100.0"))
 
-        risk_pct = float(os.getenv("RISK_PERCENT", "5"))
+        risk_pct = float(os.getenv("RISK_PERCENT", "1"))
         risk_usd = round((balance * risk_pct) / 100.0, 8)
         diff = abs(price - sl) if abs(price - sl) > 1e-12 else 1e-12
         units = round(risk_usd / diff, 8)
 
-        confidence = max(0.05, min(0.98, score))
+        confidence = max(0.05, min(0.99, score))
 
-        # --- Final Output ---
         return {
             "symbol": symbol.upper(),
             "interval": interval,
             "timestamp": datetime.utcnow().isoformat(),
-            "signal": signal,
+            "signal": "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "HOLD",
             "entry": round(price, 8),
-            "sl": round(sl, 8),
-            "tp1": round(tp1, 8),
+            "sl": round(sl, 8) if isfinite(sl) else None,
+            "tp1": round(tp1, 8) if isfinite(tp1) else None,
             "confidence": round(confidence, 2),
-            "volatility": round(volatility, 2),
             "reasons": reasons,
             "suggested_risk_usd": risk_usd,
             "suggested_units": units
@@ -180,11 +148,3 @@ def generate_signal(symbol="BTCUSDT", interval="1h"):
     except Exception as e:
         traceback.print_exc()
         return {"error": str(e)}
-
-
-# ======================================================
-# BACKWARD COMPATIBILITY
-# ======================================================
-def generate_signal_for(symbol, interval):
-    """Alias for older bots or scripts"""
-    return generate_signal(symbol, interval)
