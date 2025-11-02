@@ -9,12 +9,12 @@ import telebot
 from telebot import types
 
 # Branding tag added to every text reply
-BRAND_TAG = "\n\n— <b>Boss Destiny Trading Empire</b>"
+BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot 💎</b>"
 
 # Feature modules
-from market_providers import fetch_trending_pairs_branded, fetch_klines_multi
-from image_utils import build_signal_image, safe_send_with_image, create_brand_image
-from signal_engine import generate_signal_for
+from market_providers import fetch_trending_pairs_branded, fetch_klines_multi, get_session, fetch_trending_pairs_text
+from image_utils import build_signal_image, safe_send_with_image
+from signal_engine import generate_signal
 from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
 from ai_client import ai_analysis_text
 from pro_features import top_gainers_pairs, fear_and_greed_index, futures_leverage_suggestion
@@ -23,20 +23,21 @@ from scheduler import start_scheduler, stop_scheduler
 # Config
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT").split(",")
+PAIRS = os.getenv("PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT").split(",")
 SIGNAL_INTERVAL = os.getenv("SIGNAL_INTERVAL", "1h")
 COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "5"))
-CHALLENGE_START = float(os.getenv("CHALLENGE_START", "10"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
+CHALLENGE_START = float(os.getenv("CHALLENGE_START", "100.0"))
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is required in environment variables")
+    raise RuntimeError("BOT_TOKEN environment variable required")
 
 # Setup
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 ensure_storage()
+
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-_last_signal_time = {}
+_last_signal_time = {}  # cooldown tracker
 
 def _append_brand(text: str) -> str:
     if BRAND_TAG.strip() not in text:
@@ -44,7 +45,7 @@ def _append_brand(text: str) -> str:
     return text
 
 def stop_existing_bot_instances():
-    """Try to clear pending getUpdates sessions to reduce 409 conflicts."""
+    """Try clear pending getUpdates sessions to reduce 409 conflicts."""
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
         requests.get(url, timeout=5)
@@ -54,16 +55,15 @@ def stop_existing_bot_instances():
 
 def can_send_signal(symbol: str) -> bool:
     last = _last_signal_time.get(symbol)
-    if not last:
-        return True
+    if not last: return True
     return (datetime.utcnow() - last).total_seconds() > COOLDOWN_MIN * 60
 
 def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent: float):
     risk_amount = (balance * risk_percent) / 100.0
     diff = abs(entry - sl)
-    pos_size = 0.0
-    if diff > 1e-12:
-        pos_size = risk_amount / diff
+    if diff <= 1e-12:
+        return round(risk_amount, 8), 0.0
+    pos_size = risk_amount / diff
     return round(risk_amount, 8), round(pos_size, 8)
 
 def record_signal_and_send(sig: dict, chat_id=None, user_id=None):
@@ -86,39 +86,62 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None):
     save_data(data)
     _last_signal_time[sig["symbol"]] = datetime.utcnow()
 
+    # build caption and send image
     caption = (
         f"🔥 <b>Boss Destiny Signal</b>\n"
         f"ID: {sig_id}\nPair: {sig['symbol']} | TF: {sig['interval']}\n"
-        f"Signal: <b>{sig['signal']}</b>\nEntry: {sig['entry']} | SL: {sig['sl']} | TP1: {sig.get('tp1')}\n"
+        f"Signal: <b>{sig['signal']}</b>\nEntry: {sig['entry']} | SL: {sig['sl']} | TP1: {sig['tp1']}\n"
         f"Risk: ${risk_amt:.4f} | Pos size: {pos_size}\n"
-        f"Confidence: {int(sig.get('confidence', 0) * 100)}%\n"
-        f"Reasons: {', '.join(sig.get('reasons', []) or ['None'])}\n\n"
+        f"Confidence: {int(sig.get('confidence',0)*100)}%\n"
+        f"Reasons: {', '.join(sig.get('reasons',[]) or ['None'])}\n\n"
     )
     caption = _append_brand(caption)
     img = build_signal_image(sig)
-    kb = types.InlineKeyboardMarkup()
+    kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("📸 Link PnL", callback_data=f"link_{sig_id}"))
     kb.add(types.InlineKeyboardButton("🤖 AI Details", callback_data=f"ai_{sig_id}"))
+    kb.add(types.InlineKeyboardButton("🔁 Share", switch_inline_query=f"{sig['symbol']}"))
     safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
     return sig_id
 
+# Keyboard
 def main_keyboard():
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("📈 Get Signal", callback_data="get_signal"),
-           types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4"))
-    kb.add(types.InlineKeyboardButton("⚙️ Bot Status", callback_data="bot_status"),
-           types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending"))
-    kb.add(types.InlineKeyboardButton("📰 Market News", callback_data="market_news"),
-           types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status"))
-    kb.add(types.InlineKeyboardButton("📸 Upload PnL", callback_data="pnl_upload"),
-           types.InlineKeyboardButton("🧾 History", callback_data="history"))
-    kb.add(types.InlineKeyboardButton("🤖 Ask AI", callback_data="ask_ai"),
-           types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot"))
+    kb.add(
+        types.InlineKeyboardButton("📈 Get Signals", callback_data="get_signal"),
+        types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4")
+    )
+    kb.add(
+        types.InlineKeyboardButton("⚙️ Bot Status", callback_data="bot_status"),
+        types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📰 Market News", callback_data="market_news"),
+        types.InlineKeyboardButton("📊 My Challenge", callback_data="challenge_status")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📸 Upload PnL", callback_data="pnl_upload"),
+        types.InlineKeyboardButton("🧾 History", callback_data="history")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🤖 AI Market Brief", callback_data="ask_ai"),
+        types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot")
+    )
+    kb.add(
+        types.InlineKeyboardButton("▶️ Start Auto Brief", callback_data="start_auto_brief"),
+        types.InlineKeyboardButton("⏹ Stop Auto Brief", callback_data="stop_auto_brief")
+    )
     return kb
 
+# Handlers
 @bot.message_handler(commands=['start', 'menu'])
 def cmd_start(msg):
-    bot.send_message(msg.chat.id, f"Welcome — Boss Destiny Trading Empire\nChoose:", reply_markup=main_keyboard())
+    try:
+        bot.send_message(msg.chat.id,
+                         _append_brand("👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."),
+                         reply_markup=main_keyboard())
+    except Exception:
+        traceback.print_exc()
 
 @bot.message_handler(content_types=['photo'])
 def photo_handler(message):
@@ -131,16 +154,6 @@ def photo_handler(message):
         traceback.print_exc()
         bot.reply_to(message, _append_brand("Failed to save screenshot."))
 
-@bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().upper().startswith("AI:"))
-def ai_text_handler(message):
-    prompt = message.text.strip()[3:].strip()
-    if not prompt:
-        bot.reply_to(message, _append_brand("AI: please provide a question after 'AI:'"))
-        return
-    bot.send_chat_action(message.chat.id, "typing")
-    ans = ai_analysis_text(prompt)
-    bot.send_message(message.chat.id, _append_brand(f"🤖 AI —\n{ans}"))
-
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().startswith("#link"))
 def link_handler(message):
     try:
@@ -150,22 +163,24 @@ def link_handler(message):
             return
         sig_id, tag = parts[1], parts[2].upper()
         d = load_data()
-        pnl_item = next((p for p in reversed(d.get("pnl", [])) if p.get("linked") is None and p["from"] == message.from_user.id), None)
+        pnl_item = next((p for p in reversed(d.get("pnl",[])) if p.get("linked") is None and p["from"] == message.from_user.id), None)
         if not pnl_item:
             bot.reply_to(message, _append_brand("No unlinked screenshot found."))
             return
         pnl_item["linked"] = {"signal_id": sig_id, "result": tag, "linked_by": message.from_user.id}
+        # only admin confirmation updates balance
         if message.from_user.id == ADMIN_ID:
-            srec = next((s for s in d.get("signals", []) if s["id"] == sig_id), None)
+            srec = next((s for s in d.get("signals",[]) if s["id"]==sig_id), None)
             if srec:
                 risk = srec.get("risk_amt", 0)
                 if tag.startswith("TP"):
                     d["challenge"]["balance"] = d["challenge"].get("balance", CHALLENGE_START) + risk
                     d["challenge"]["wins"] = d["challenge"].get("wins", 0) + 1
+                    d["stats"]["wins"] = d["stats"].get("wins",0) + 1
                 elif tag == "SL":
                     d["challenge"]["balance"] = d["challenge"].get("balance", CHALLENGE_START) - risk
-                    d["challenge"]["losses"] = d["challenge"].get("losses", 0) + 1
-                srec["result"] = tag
+                    d["challenge"]["losses"] = d["challenge"].get("losses",0) + 1
+                    d["stats"]["losses"] = d["stats"].get("losses",0) + 1
         save_data(d)
         bot.reply_to(message, _append_brand(f"Linked screenshot to {sig_id} as {tag}. Admin confirmation updates balance."))
     except Exception:
@@ -178,18 +193,17 @@ def callback_handler(call):
         cid = call.message.chat.id
         data = call.data
         bot.answer_callback_query(call.id)
-
         if data == "get_signal":
             kb = types.InlineKeyboardMarkup()
             for p in PAIRS:
                 kb.add(types.InlineKeyboardButton(p, callback_data=f"sig_{p}"))
-            bot.send_message(cid, _append_brand("Choose pair:"), reply_markup=kb)
+            bot.send_message(cid, _append_brand("Choose pair to analyze:"), reply_markup=kb)
             return
 
         if data.startswith("sig_"):
             pair = data.split("_",1)[1]
             bot.send_chat_action(cid, "typing")
-            sig = generate_signal_for(pair, SIGNAL_INTERVAL)
+            sig = generate_signal(pair, SIGNAL_INTERVAL)
             if sig.get("error"):
                 bot.send_message(cid, _append_brand(f"Error generating signal: {sig['error']}"))
                 return
@@ -197,22 +211,23 @@ def callback_handler(call):
             return
 
         if data == "scan_top4":
-            bot.send_message(cid, _append_brand("🔎 Scanning top pairs..."))
-            for p in PAIRS[:4]:
+            bot.send_message(cid, _append_brand("🔎 Scanning top pairs across exchanges..."))
+            for p in PAIRS[:6]:
                 try:
-                    sig = generate_signal_for(p, SIGNAL_INTERVAL)
-                    if not sig.get("error") and sig["signal"] in ("BUY","SELL","LONG","SHORT"):
-                        record_signal_and_send(sig, chat_id=cid)
+                    if can_send_signal(p):
+                        sig = generate_signal(p, SIGNAL_INTERVAL)
+                        if not sig.get("error") and sig["signal"] in ("LONG","SHORT"):
+                            record_signal_and_send(sig, chat_id=cid)
                 except Exception as e:
                     logging.error("scan_top4 error: %s", e)
             return
 
         if data == "trending":
-            bot.send_message(cid, "📡 Fetching real-time multi-exchange data... please wait.")
+            bot.send_message(cid, _append_brand("📡 Fetching multi-exchange trending pairs... please wait."))
             try:
-                img_buf, caption = fetch_trending_pairs_branded(limit=10)
+                img_buf, caption = fetch_trending_pairs_branded(limit=8)
                 if img_buf:
-                    safe_send_with_image(bot, cid, caption, img_buf)
+                    safe_send_with_image(bot, cid, _append_brand(caption), img_buf)
                 else:
                     bot.send_message(cid, _append_brand(caption))
             except Exception as e:
@@ -247,6 +262,16 @@ def callback_handler(call):
             bot.send_message(cid, _append_brand("✅ Refreshed."))
             return
 
+        if data == "start_auto_brief":
+            bot.send_message(cid, _append_brand("▶️ Starting background market scanner (auto-brief)."))
+            start_scheduler(bot)
+            return
+
+        if data == "stop_auto_brief":
+            bot.send_message(cid, _append_brand("⏹ Stopping background market scanner."))
+            stop_scheduler()
+            return
+
         if data.startswith("ai_"):
             sig_id = data.split("_",1)[1]
             d = load_data()
@@ -254,7 +279,7 @@ def callback_handler(call):
             if not rec:
                 bot.send_message(cid, _append_brand("Signal not found"))
                 return
-            prompt = f"Provide trade rationale, risk controls and recommended leverage for this trade:\n{rec['signal']}"
+            prompt = f"Provide trade rationale, risk controls and a recommended leverage for this trade:\n{rec['signal']}"
             ai_text = ai_analysis_text(prompt)
             bot.send_message(cid, _append_brand(f"🤖 AI analysis:\n{ai_text}"))
             return
@@ -262,9 +287,12 @@ def callback_handler(call):
         bot.send_message(cid, _append_brand("Unknown action"))
     except Exception:
         traceback.print_exc()
-        try: bot.answer_callback_query(call.id, "Handler error")
-        except: pass
+        try:
+            bot.answer_callback_query(call.id, "Handler error")
+        except:
+            pass
 
+# Start polling safely
 def start_bot_polling():
     stop_existing_bot_instances()
     logging.info("[BOT] Starting polling loop...")
@@ -274,7 +302,7 @@ def start_bot_polling():
         except Exception as e:
             logging.error("[BOT] Polling loop exception: %s", e)
             if "409" in str(e):
-                logging.warning("[BOT] 409 Conflict - retrying cleanup...")
+                logging.warning("[BOT] 409 Conflict - attempting to stop other sessions and retry")
                 stop_existing_bot_instances()
                 time.sleep(5)
             else:
