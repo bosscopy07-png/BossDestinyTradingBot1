@@ -1,150 +1,116 @@
-# signal_engine.py
-import os
-import traceback
-from datetime import datetime
-from math import isfinite
-import numpy as np
+import requests
 import pandas as pd
-from market_providers import fetch_klines_multi
+import numpy as np
+import time
 
-# ---------- indicators ----------
-def ema(series, period):
-    return series.ewm(span=period, adjust=False).mean()
+# -----------------------------
+# CONFIG
+# -----------------------------
+PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT", "MATICUSDT", "ADAUSDT"]
+TIMEFRAME = "15m"  # 1m, 5m, 15m, 1h, 4h, etc.
+LIMIT = 200        # Number of candles to fetch
 
-def sma(series, period):
-    return series.rolling(period).mean()
+# Primary + fallback exchange URLs
+EXCHANGES = {
+    "binance": "https://api.binance.com/api/v3/klines?symbol={pair}&interval={tf}&limit={limit}",
+    "bybit": "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval={tf}&limit={limit}",
+    "kucoin": "https://api.kucoin.com/api/v1/market/candles?type={tf}&symbol={pair}"
+}
 
-def rsi(series, period=14):
+# -----------------------------
+# CORE FUNCTIONS
+# -----------------------------
+def fetch_candles(pair, tf=TIMEFRAME, limit=LIMIT):
+    for name, url in EXCHANGES.items():
+        try:
+            endpoint = url.format(pair=pair, tf=tf, limit=limit)
+            print(f"Fetching {pair} from {name}...")
+            r = requests.get(endpoint, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            # Normalize data structure across exchanges
+            if name == "binance":
+                df = pd.DataFrame(data, columns=[
+                    "time", "open", "high", "low", "close", "volume",
+                    "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
+                ])
+                df["close"] = df["close"].astype(float)
+            elif name == "bybit":
+                df = pd.DataFrame(data["result"]["list"], columns=[
+                    "time", "open", "high", "low", "close", "volume", "turnover"
+                ])
+                df["close"] = df["close"].astype(float)
+            elif name == "kucoin":
+                df = pd.DataFrame(data["data"], columns=[
+                    "time", "open", "close", "high", "low", "volume", "turnover"
+                ])
+                df["close"] = df["close"].astype(float)
+            else:
+                continue
+
+            # Sort by time ascending
+            df = df.iloc[::-1].reset_index(drop=True)
+            if len(df) > 10:
+                return df
+        except Exception as e:
+            print(f"⚠️ {name} failed: {e}")
+            continue
+    return None
+
+
+def calculate_indicators(df):
+    df["MA20"] = df["close"].rolling(window=20).mean()
+    df["MA50"] = df["close"].rolling(window=50).mean()
+    df["EMA10"] = df["close"].ewm(span=10, adjust=False).mean()
+    df["RSI"] = compute_rsi(df["close"], 14)
+    df["MACD"] = df["close"].ewm(span=12, adjust=False).mean() - df["close"].ewm(span=26, adjust=False).mean()
+    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+    return df
+
+
+def compute_rsi(series, period=14):
     delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ma_up = up.ewm(alpha=1/period, adjust=False).mean()
-    ma_down = down.ewm(alpha=1/period, adjust=False).mean()
-    rs = ma_up / (ma_down + 1e-9)
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def macd(series, fast=12, slow=26, signal=9):
-    ef = series.ewm(span=fast, adjust=False).mean()
-    es = series.ewm(span=slow, adjust=False).mean()
-    mc = ef - es
-    msig = mc.ewm(span=signal, adjust=False).mean()
-    hist = mc - msig
-    return mc, msig, hist
 
-def bollinger_bands(series, period=20, std_factor=2):
-    sma_val = sma(series, period)
-    std = series.rolling(period).std()
-    upper = sma_val + std_factor * std
-    lower = sma_val - std_factor * std
-    return upper, lower
+def generate_signal(df):
+    if df is None or len(df) < 50:
+        return "Error: Insufficient data"
 
-# ---------- main generator ----------
-def generate_signal(symbol="BTCUSDT", interval="1h"):
-    """
-    Return a signal dict with: symbol, interval, signal(LONG/SHORT/HOLD), entry, sl, tp1, confidence, reasons
-    Uses multi-exchange public data (defaults to binance).
-    """
-    try:
-        df = fetch_klines_multi(symbol=symbol, interval=interval, limit=500, exchange="binance")
-        if df is None or len(df) < 30:
-            return {"error": "Insufficient data for signal generation"}
+    last = df.iloc[-1]
 
-        # config
-        fast_ema = int(os.getenv("EMA_FAST", "9"))
-        slow_ema = int(os.getenv("EMA_SLOW", "21"))
-        rsi_period = int(os.getenv("RSI_PERIOD", "14"))
-        bb_period = int(os.getenv("BB_PERIOD", "20"))
-        bb_std = float(os.getenv("BB_STD", "2"))
+    # Signal logic
+    if last["MA20"] > last["MA50"] and last["RSI"] < 70 and last["MACD"] > last["Signal"]:
+        return "STRONG BUY 📈"
+    elif last["MA20"] < last["MA50"] and last["RSI"] > 30 and last["MACD"] < last["Signal"]:
+        return "STRONG SELL 📉"
+    else:
+        return "NO CLEAR SIGNAL ⚖️"
 
-        df["close"] = df["close"].astype(float)
-        df["low"] = df["low"].astype(float)
-        df["high"] = df["high"].astype(float)
 
-        df["ema_fast"] = ema(df["close"], fast_ema)
-        df["ema_slow"] = ema(df["close"], slow_ema)
-        df["rsi"] = rsi(df["close"], rsi_period)
-        macd_val, macd_sig, macd_hist = macd(df["close"])
-        df["macd"] = macd_val
-        df["macd_signal"] = macd_sig
-        df["macd_hist"] = macd_hist
-        df["bb_upper"], df["bb_lower"] = bollinger_bands(df["close"], bb_period, bb_std)
-
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        signal = "HOLD"
-        reasons = []
-        score = 0.5
-
-        # EMA cross
-        if prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]:
-            signal = "LONG"
-            reasons.append("EMA cross up")
-            score += 0.14
-        elif prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]:
-            signal = "SHORT"
-            reasons.append("EMA cross down")
-            score += 0.14
-
-        # MACD
-        if last["macd_hist"] > 0 and signal == "LONG":
-            score += 0.08; reasons.append("MACD positive")
-        if last["macd_hist"] < 0 and signal == "SHORT":
-            score += 0.08; reasons.append("MACD negative")
-
-        # RSI sanity
-        r = float(last["rsi"])
-        if signal == "LONG" and r > 80:
-            reasons.append("High RSI - caution"); score -= 0.08
-        if signal == "SHORT" and r < 20:
-            reasons.append("Low RSI - caution"); score -= 0.08
-
-        # Bollinger context
-        if signal == "LONG" and last["close"] < last["bb_lower"]:
-            reasons.append("Price near lower BB"); score += 0.03
-        if signal == "SHORT" and last["close"] > last["bb_upper"]:
-            reasons.append("Price near upper BB"); score += 0.03
-
-        price = float(last["close"])
-        if signal == "LONG":
-            sl = float(df["low"].iloc[-3])
-            tp1 = price + (price - sl) * 1.5
-        elif signal == "SHORT":
-            sl = float(df["high"].iloc[-3])
-            tp1 = price - (sl - price) * 1.5
+# -----------------------------
+# MAIN FUNCTION
+# -----------------------------
+def get_signals():
+    results = {}
+    for pair in PAIRS:
+        df = fetch_candles(pair)
+        if df is not None:
+            df = calculate_indicators(df)
+            signal = generate_signal(df)
+            results[pair] = signal
+            print(f"{pair}: {signal}")
         else:
-            sl = price * 0.995
-            tp1 = price * 1.005
+            results[pair] = "Error: No market data"
+    return results
 
-        # risk sizing
-        try:
-            from storage import load_data
-            d = load_data()
-            balance = d.get("challenge", {}).get("balance", float(os.getenv("CHALLENGE_START", "100.0")))
-        except Exception:
-            balance = float(os.getenv("CHALLENGE_START", "100.0"))
 
-        risk_pct = float(os.getenv("RISK_PERCENT", "1"))
-        risk_usd = round((balance * risk_pct) / 100.0, 8)
-        diff = abs(price - sl) if abs(price - sl) > 1e-12 else 1e-12
-        units = round(risk_usd / diff, 8)
-
-        confidence = max(0.05, min(0.99, score))
-
-        return {
-            "symbol": symbol.upper(),
-            "interval": interval,
-            "timestamp": datetime.utcnow().isoformat(),
-            "signal": "BUY" if signal == "LONG" else "SELL" if signal == "SHORT" else "HOLD",
-            "entry": round(price, 8),
-            "sl": round(sl, 8) if isfinite(sl) else None,
-            "tp1": round(tp1, 8) if isfinite(tp1) else None,
-            "confidence": round(confidence, 2),
-            "reasons": reasons,
-            "suggested_risk_usd": risk_usd,
-            "suggested_units": units
-        }
-
-    except Exception as e:
-        traceback.print_exc()
-        return {"error": str(e)}
+if __name__ == "__main__":
+    while True:
+        signals = get_signals()
+        print("✅ Signals updated:", signals)
+        time.sleep(60 * 15)  # update every 15 minutes
