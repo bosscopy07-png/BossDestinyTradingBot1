@@ -1,82 +1,38 @@
+# scheduler.py
 import threading
 import time
-import traceback
+import logging
 from datetime import datetime
-from pro_features import ai_market_brief_text
-from image_utils import build_signal_image, safe_send_with_image
-import os
+from pro_features import top_gainers_pairs, ai_market_brief_text
+from storage import load_data, save_data
 
-# internal state
-_scheduler_threads = {}  # chat_id -> thread
-_stop_events = {}        # chat_id -> threading.Event
+_logger = logging.getLogger("scheduler")
+_scheduler_thread = None
+_stop_event = threading.Event()
 
-def _run_periodic_job(chat_id, interval_hours=4, use_image=True):
-    """
-    Periodic job to fetch AI market brief and send to Telegram.
-    """
-    interval_sec = interval_hours * 3600
-    print(f"[Scheduler] Started for chat {chat_id}, every {interval_hours}h")
-    
-    stop_event = _stop_events[chat_id]
-
-    while not stop_event.is_set():
+def _worker(bot, interval_sec=300):
+    _logger.info("Auto-brief worker starting...")
+    while not _stop_event.is_set():
         try:
-            now = datetime.utcnow()
-            brief_text = ai_market_brief_text()
-            if use_image:
-                img_buf = build_signal_image({"symbol":"Market Brief","interval":"--","signal":"--","entry":"--",
-                                              "SL":"--","TP1":"--","confidence":1,"risk_usd":0,"reasons":[brief_text]})
-            else:
-                img_buf = None
-
-            # Send via Telegram
-            import telebot
-            bot_token = os.getenv("BOT_TOKEN")
-            bot = telebot.TeleBot(bot_token, parse_mode="HTML")
-            safe_send_with_image(bot, chat_id, f"🤖 Boss Destiny AI Market Brief ({now.isoformat()})", image_buf=img_buf)
+            # get top gainers text and broadcast to admin for review
+            txt = top_gainers_pairs(limit=5)
+            bot.send_message(int(bot.chat_id) if hasattr(bot, "chat_id") else bot.get_me().id, f"Auto-brief snapshot:\n{txt}")
         except Exception as e:
-            print(f"[Scheduler] Error sending market brief: {e}")
-            traceback.print_exc()
+            _logger.exception("Auto-brief error: %s", e)
+        _stop_event.wait(interval_sec)
+    _logger.info("Auto-brief worker stopping...")
 
-        # Sleep in small intervals to respond quickly to stop
-        for _ in range(int(interval_sec)):
-            if stop_event.is_set():
-                break
-            time.sleep(1)
+def start_scheduler(bot, interval_sec=600):
+    global _scheduler_thread, _stop_event
+    if _scheduler_thread and _scheduler_thread.is_alive():
+        _logger.info("Scheduler already running")
+        return
+    _stop_event.clear()
+    _scheduler_thread = threading.Thread(target=_worker, args=(bot, interval_sec), daemon=True)
+    _scheduler_thread.start()
+    _logger.info("Scheduler started")
 
-    print(f"[Scheduler] Stopped for chat {chat_id}")
-
-def start_scheduler(chat_id, interval_hours=4, use_image=True):
-    """
-    Start a scheduler job for a specific chat.
-    """
-    if chat_id in _scheduler_threads and _scheduler_threads[chat_id].is_alive():
-        return f"[Scheduler] Already running for chat {chat_id}"
-    
-    stop_event = threading.Event()
-    _stop_events[chat_id] = stop_event
-    thread = threading.Thread(target=_run_periodic_job, args=(chat_id, interval_hours, use_image), daemon=True)
-    _scheduler_threads[chat_id] = thread
-    thread.start()
-    return f"[Scheduler] Started for chat {chat_id}, interval: {interval_hours}h"
-
-def stop_scheduler(chat_id=None):
-    """
-    Stop scheduler job(s). If chat_id is None, stop all.
-    """
-    if chat_id:
-        if chat_id in _stop_events:
-            _stop_events[chat_id].set()
-            return f"[Scheduler] Stop signal sent for chat {chat_id}"
-        return f"[Scheduler] No scheduler running for chat {chat_id}"
-    else:
-        for cid, event in _stop_events.items():
-            event.set()
-        return "[Scheduler] Stop signal sent for all chat jobs"
-
-def list_running_schedulers():
-    """
-    List all currently running scheduler chat IDs.
-    """
-    running = [cid for cid, t in _scheduler_threads.items() if t.is_alive()]
-    return running
+def stop_scheduler():
+    global _stop_event
+    _stop_event.set()
+    _logger.info("Scheduler stop requested")
