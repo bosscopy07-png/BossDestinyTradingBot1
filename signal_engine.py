@@ -1,124 +1,106 @@
-import requests
-import pandas as pd
-import numpy as np
-import time
+# signal_engine.py
+import logging
+import traceback
+from typing import Dict, Any
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-PAIRS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "DOGEUSDT", "XRPUSDT", "MATICUSDT", "ADAUSDT"]
-TIMEFRAME = "15m"  # 1m, 5m, 15m, 1h, 4h, etc.
-LIMIT = 200        # Number of candles to fetch
+log = logging.getLogger("signal_engine")
+log.setLevel(logging.INFO)
 
-# Primary + fallback exchange URLs
-EXCHANGES = {
-    "binance": "https://api.binance.com/api/v3/klines?symbol={pair}&interval={tf}&limit={limit}",
-    "bybit": "https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval={tf}&limit={limit}",
-    "kucoin": "https://api.kucoin.com/api/v1/market/candles?type={tf}&symbol={pair}"
-}
+# Prefer the advanced multi-tf analyzer in market_providers if available
+try:
+    from market_providers import analyze_pair_multi_timeframes, fetch_klines_multi
+except Exception:
+    analyze_pair_multi_timeframes = None
+    fetch_klines_multi = None
+    log.exception("market_providers not available in signal_engine")
 
-# -----------------------------
-# CORE FUNCTIONS
-# -----------------------------
-def fetch_candles(pair, tf=TIMEFRAME, limit=LIMIT):
-    for name, url in EXCHANGES.items():
-        try:
-            endpoint = url.format(pair=pair, tf=tf, limit=limit)
-            print(f"Fetching {pair} from {name}...")
-            r = requests.get(endpoint, timeout=10)
-            r.raise_for_status()
-            data = r.json()
+# Simple fallback engine (if advanced analyzer not present)
+def _fallback_simple_signal(symbol: str, interval: str) -> Dict[str, Any]:
+    """
+    Basic indicator-based fallback: loads 200 candles from Binance (via fetch_klines_multi if available)
+    and uses simple MA/RSI cross logic to return a signal dict.
+    """
+    try:
+        df = None
+        if fetch_klines_multi:
+            df = fetch_klines_multi(symbol, interval, limit=200, exchange="binance")
+        # if no df returned -> error
+        if df is None or df.empty:
+            return {"error": "insufficient_data"}
 
-            # Normalize data structure across exchanges
-            if name == "binance":
-                df = pd.DataFrame(data, columns=[
-                    "time", "open", "high", "low", "close", "volume",
-                    "close_time", "qav", "trades", "tb_base", "tb_quote", "ignore"
-                ])
-                df["close"] = df["close"].astype(float)
-            elif name == "bybit":
-                df = pd.DataFrame(data["result"]["list"], columns=[
-                    "time", "open", "high", "low", "close", "volume", "turnover"
-                ])
-                df["close"] = df["close"].astype(float)
-            elif name == "kucoin":
-                df = pd.DataFrame(data["data"], columns=[
-                    "time", "open", "close", "high", "low", "volume", "turnover"
-                ])
-                df["close"] = df["close"].astype(float)
-            else:
-                continue
+        # compute simple indicators
+        close = df["close"].astype(float)
+        ma20 = close.rolling(20).mean().iloc[-1]
+        ma50 = close.rolling(50).mean().iloc[-1]
+        # RSI
+        delta = close.diff()
+        gain = delta.clip(lower=0).rolling(14).mean().iloc[-1]
+        loss = (-delta.clip(upper=0)).rolling(14).mean().iloc[-1]
+        rs = gain / (loss + 1e-12)
+        rsi = 100 - (100 / (1 + rs))
 
-            # Sort by time ascending
-            df = df.iloc[::-1].reset_index(drop=True)
-            if len(df) > 10:
-                return df
-        except Exception as e:
-            print(f"⚠️ {name} failed: {e}")
-            continue
-    return None
-
-
-def calculate_indicators(df):
-    df["MA20"] = df["close"].rolling(window=20).mean()
-    df["MA50"] = df["close"].rolling(window=50).mean()
-    df["EMA10"] = df["close"].ewm(span=10, adjust=False).mean()
-    df["RSI"] = compute_rsi(df["close"], 14)
-    df["MACD"] = df["close"].ewm(span=12, adjust=False).mean() - df["close"].ewm(span=26, adjust=False).mean()
-    df["Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-    return df
-
-
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def generate_signal(df, pair=None):
-    if df is None or len(df) < 50:
-        return "Error: Insufficient data"
-
-    last = df.iloc[-1]
-
-    # Signal logic
-    if last["MA20"] > last["MA50"] and last["RSI"] < 70 and last["MACD"] > last["Signal"]:
-        return f"{pair or ''} → STRONG BUY 📈"
-    elif last["MA20"] < last["MA50"] and last["RSI"] > 30 and last["MACD"] < last["Signal"]:
-        return f"{pair or ''} → STRONG SELL 📉"
-    else:
-        return f"{pair or ''} → NO CLEAR SIGNAL ⚖️"
-
-
-# -----------------------------
-# MAIN FUNCTION
-# -----------------------------
-def get_signals():
-    results = {}
-    for pair in PAIRS:
-        df = fetch_candles(pair)
-        if df is not None:
-            df = calculate_indicators(df)
-            signal = generate_signal(df)
-            results[pair] = signal
-            print(f"{pair}: {signal}")
+        # decide
+        if ma20 > ma50 and rsi < 70:
+            sig = "LONG"
+        elif ma20 < ma50 and rsi > 30:
+            sig = "SHORT"
         else:
-            results[pair] = "Error: No market data"
-    return results
+            sig = "HOLD"
 
+        last = float(close.iloc[-1])
+        sl = round(last * (0.995 if sig != "SHORT" else 1.005), 8)
+        tp1 = round(last * (1.005 if sig != "SHORT" else 0.995), 8)
+        confidence = 0.5
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "signal": sig,
+            "entry": last,
+            "sl": sl,
+            "tp1": tp1,
+            "confidence": confidence,
+            "reasons": ["fallback_simple"]
+        }
+    except Exception:
+        log.exception("fallback signal generation failed")
+        return {"error": "engine_failed"}
 
-def get_latest_signals():
-    """Wrapper for bot_runner to fetch all signals."""
-    return get_signals()
-
-
-# -----------------------------
-# MAIN LOOP (for standalone testing)
-# -----------------------------
-if __name__ == "__main__":
-    while True:
-        signals = get_signals()
-        print("✅ Signals updated:", signals)
-        time.sleep(60 * 15)
+def generate_signal(symbol: str, interval: str = "1h") -> Dict[str, Any]:
+    """
+    Unified interface used by bot_runner. Returns a dict with:
+    { symbol, interval, signal, entry, sl, tp1, confidence, reasons } or {'error':...}
+    """
+    try:
+        symbol = str(symbol).upper().replace("/", "").replace("-", "")
+        # prefer analyze_pair_multi_timeframes for stronger signals
+        if analyze_pair_multi_timeframes:
+            try:
+                # analyze using the requested interval + 1h and 4h context
+                tfs = [interval]
+                if "1h" not in tfs: tfs.append("1h")
+                if "4h" not in tfs: tfs.append("4h")
+                res = analyze_pair_multi_timeframes(symbol, timeframes=tfs, exchange="binance")
+                if res.get("error"):
+                    return {"error": res.get("error")}
+                combined = res.get("combined_score", 0.0)
+                combined_signal = res.get("combined_signal", "HOLD")
+                # prefer the exact interval info if available otherwise 1h
+                info = res.get("analysis", {}).get(interval) or res.get("analysis", {}).get("1h") or next(iter(res.get("analysis", {}).values()))
+                return {
+                    "symbol": symbol,
+                    "interval": interval,
+                    "signal": info.get("signal", combined_signal),
+                    "entry": info.get("close"),
+                    "sl": info.get("sl"),
+                    "tp1": info.get("tp1"),
+                    "confidence": float(res.get("combined_score", 0.0)),
+                    "reasons": info.get("reasons", [])
+                }
+            except Exception:
+                log.exception("analyze_pair_multi_timeframes failed, falling back")
+                # fall through to fallback
+        # fallback:
+        return _fallback_simple_signal(symbol, interval)
+    except Exception:
+        log.exception("generate_signal top-level failed")
+        return {"error": "generate_failed"}
