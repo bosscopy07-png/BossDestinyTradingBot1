@@ -432,3 +432,20 @@ def fetch_trending_pairs_branded(limit:int=10) -> Tuple[Optional[BytesIO], str]:
     except Exception:
         traceback.print_exc()
         return None, "Error fetching trending pairs."
+
+        def fetch_trending_pairs_text(limit=10):
+    """
+    Fetch trending pairs and format them as human-readable text.
+    This helps the bot list active pairs in the market.
+    """
+    pairs = []
+    for pair in PAIRS[:limit]:
+        df = fetch_candles(pair)
+        if df is not None and len(df) > 10:
+            df = calculate_indicators(df)
+            sig = generate_signal(df, pair)
+            pairs.append(f"{pair}: {sig}")
+        else:
+            pairs.append(f"{pair}: ⚠️ No data available")
+
+    return "\n".join(pairs)
