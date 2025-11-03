@@ -5,6 +5,7 @@ import threading
 import traceback
 import requests
 import logging
+import inspect
 from datetime import datetime
 import telebot
 from telebot import types
@@ -129,16 +130,146 @@ def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent:
     pos_size = risk_amount / diff
     return round(risk_amount, 8), round(pos_size, 8)
 
-def _safe_generate_signal(symbol: str, interval: str):
-    """Call your signal engine, but catch exceptions and normalize result."""
+# ---------------------------
+# Compatibility wrappers
+# ---------------------------
+def _call_generate_signal_flexibly(symbol: str, interval: str):
+    """
+    Support both signal_engine.generate_signal(symbol, interval)
+    and generate_signal(df) signatures. Return dict or {error: ...}
+    """
     if not generate_signal:
         return {"error": "signal_engine.generate_signal not available"}
+
     try:
-        return generate_signal(symbol, interval)
-    except Exception as e:
-        logging.error("generate_signal error for %s %s: %s", symbol, interval, e)
-        traceback.print_exc()
-        return {"error": str(e)}
+        sig_spec = inspect.signature(generate_signal)
+        params = len(sig_spec.parameters)
+    except Exception:
+        params = None
+
+    # If function expects 1 positional parameter and user provided df-style earlier,
+    # we will attempt to fetch klines df and pass that single arg.
+    if params == 1:
+        # need a DataFrame; try market_providers.fetch_klines_multi
+        if fetch_klines_multi:
+            try:
+                df = fetch_klines_multi(symbol=symbol, interval=interval, limit=300, exchange="binance")
+                if df is None:
+                    return {"error": "No kline data available to pass to generate_signal(df)"}
+                res = generate_signal(df)
+                # If generate_signal returned a string or dict, normalize later
+                return {"raw": res, "source_df": df}
+            except Exception as e:
+                logging.error("Error calling generate_signal(df) for %s %s: %s", symbol, interval, e)
+                traceback.print_exc()
+                return {"error": str(e)}
+        else:
+            return {"error": "fetch_klines_multi not available to build df for generate_signal(df)"}
+    else:
+        # call generate_signal(symbol, interval) directly
+        try:
+            res = generate_signal(symbol, interval)
+            return {"raw": res, "source_df": None}
+        except Exception as e:
+            logging.error("Error calling generate_signal(symbol, interval) for %s %s: %s", symbol, interval, e)
+            traceback.print_exc()
+            return {"error": str(e)}
+
+def _normalize_signal(raw_result, symbol: str, interval: str, source_df=None):
+    """
+    Turn whatever generate_signal returned into a standard dict:
+    {
+      symbol, interval, timestamp, signal, entry, sl, tp1, confidence, reasons: [...]
+    }
+    - raw_result may be dict, DataFrame, or string.
+    - source_df: if available, used to infer price/entry
+    """
+    # If the wrapper returned an error
+    if isinstance(raw_result, dict) and raw_result.get("error"):
+        return {"error": raw_result.get("error")}
+
+    raw = raw_result
+    # If the wrapper returned {"raw": ..., "source_df": df} pattern
+    if isinstance(raw_result, dict) and "raw" in raw_result:
+        raw = raw_result["raw"]
+        if not source_df:
+            source_df = raw_result.get("source_df")
+
+    # If generate_signal returned a dict with expected structure already
+    if isinstance(raw, dict):
+        # ensure required fields exist
+        res = {
+            "symbol": raw.get("symbol", symbol).upper(),
+            "interval": raw.get("interval", interval),
+            "timestamp": raw.get("timestamp", datetime.utcnow().isoformat()),
+            "signal": raw.get("signal", "HOLD"),
+            "entry": raw.get("entry") or raw.get("price") or None,
+            "sl": raw.get("sl") or raw.get("stop") or None,
+            "tp1": raw.get("tp1") or raw.get("tp") or None,
+            "confidence": float(raw.get("confidence") or raw.get("conf") or 0.5),
+            "reasons": raw.get("reasons") or raw.get("notes") or []
+        }
+        # if numeric entry missing try infer from source_df
+        if (res["entry"] is None or res["sl"] is None) and source_df is not None:
+            try:
+                last_close = float(source_df["close"].iloc[-1])
+                if res["entry"] is None:
+                    res["entry"] = round(last_close, 8)
+                if res["sl"] is None:
+                    res["sl"] = round(last_close * 0.995, 8)  # small default SL
+                if res["tp1"] is None:
+                    res["tp1"] = round(last_close * 1.005, 8)
+            except Exception:
+                pass
+        return res
+
+    # If generate_signal returned a simple string (e.g. "STRONG BUY") or pandas object
+    if isinstance(raw, str):
+        # make simple dict
+        base_entry = None
+        base_sl = None
+        base_tp = None
+        # use source_df if available to infer numbers
+        if source_df is not None:
+            try:
+                base_entry = round(float(source_df["close"].iloc[-1]), 8)
+                base_sl = round(base_entry * 0.995, 8)
+                base_tp = round(base_entry * 1.005, 8)
+            except Exception:
+                base_entry = None
+        return {
+            "symbol": symbol.upper(),
+            "interval": interval,
+            "timestamp": datetime.utcnow().isoformat(),
+            "signal": raw,
+            "entry": base_entry or 0.0,
+            "sl": base_sl or 0.0,
+            "tp1": base_tp or 0.0,
+            "confidence": 0.5,
+            "reasons": []
+        }
+
+    # If a DataFrame or other type - fallback
+    try:
+        if hasattr(raw, "iloc") and source_df is None:
+            source_df = raw
+        if source_df is not None:
+            last_close = float(source_df["close"].iloc[-1])
+            return {
+                "symbol": symbol.upper(),
+                "interval": interval,
+                "timestamp": datetime.utcnow().isoformat(),
+                "signal": "HOLD",
+                "entry": round(last_close, 8),
+                "sl": round(last_close * 0.995, 8),
+                "tp1": round(last_close * 1.005, 8),
+                "confidence": 0.5,
+                "reasons": ["inferred from price"]
+            }
+    except Exception:
+        pass
+
+    return {"error": "Unsupported signal result format"}
 
 # ----- recording & messaging -----
 def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
@@ -153,11 +284,14 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
     balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
 
     # risk and pos
-    risk_amt, pos_size = compute_risk_and_size(
-        sig.get("entry") or sig.get("entry", 0),
-        sig.get("sl") or sig.get("sl", 0),
-        balance, RISK_PERCENT
-    )
+    try:
+        entry_val = float(sig.get("entry") or 0)
+        sl_val = float(sig.get("sl") or 0)
+    except Exception:
+        entry_val = 0.0
+        sl_val = 0.0
+
+    risk_amt, pos_size = compute_risk_and_size(entry_val, sl_val, balance, RISK_PERCENT)
 
     rec = {
         "id": sig_id,
@@ -348,11 +482,17 @@ def callback_handler(call):
         if data.startswith("sig_"):
             pair = data.split("_",1)[1]
             bot.send_chat_action(cid, "typing")
-            sig = _safe_generate_signal(pair, SIGNAL_INTERVAL_DEFAULT)
-            if sig.get("error"):
-                bot.send_message(cid, _append_brand(f"Error generating signal: {sig['error']}"))
+            # ----- FLEXIBLE CALL -----
+            wrapper = _call_generate_signal_flexibly(pair, SIGNAL_INTERVAL_DEFAULT)
+            if wrapper.get("error"):
+                bot.send_message(cid, _append_brand(f"Error generating signal: {wrapper['error']}"))
                 return
-            record_signal_and_send(sig, chat_id=cid, user_id=call.from_user.id, auto=False)
+            # Normalize into dict and handle message
+            normalized = _normalize_signal(wrapper, pair, SIGNAL_INTERVAL_DEFAULT)
+            if normalized.get("error"):
+                bot.send_message(cid, _append_brand(f"Error normalizing signal: {normalized['error']}"))
+                return
+            record_signal_and_send(normalized, chat_id=cid, user_id=call.from_user.id, auto=False)
             return
 
         # quick scan top X
@@ -361,8 +501,11 @@ def callback_handler(call):
             for p in PAIRS[:6]:
                 try:
                     if can_send_signal(p, SIGNAL_INTERVAL_DEFAULT):
-                        sig = _safe_generate_signal(p, SIGNAL_INTERVAL_DEFAULT)
-                        if not sig.get("error") and sig.get("signal") in ("LONG","SHORT"):
+                        wrapper = _call_generate_signal_flexibly(p, SIGNAL_INTERVAL_DEFAULT)
+                        if wrapper.get("error"):
+                            continue
+                        sig = _normalize_signal(wrapper, p, SIGNAL_INTERVAL_DEFAULT)
+                        if not sig.get("error") and str(sig.get("signal")).upper() in ("LONG","SHORT","STRONG BUY","STRONG SELL"):
                             record_signal_and_send(sig, chat_id=cid)
                 except Exception:
                     logging.exception("scan_top4 subtask failed")
@@ -465,7 +608,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "Handler error")
         except Exception:
             pass
-            
+
 # ----- Background scanner (auto-detect strong signals) -----
 def _scanner_loop():
     """
@@ -486,14 +629,25 @@ def _scanner_loop():
                     if not can_send_signal(pair, interval):
                         continue
 
-                    sig = _safe_generate_signal(pair, interval)
+                    wrapper = _call_generate_signal_flexibly(pair, interval)
+                    if wrapper.get("error"):
+                        # don't spam logs every failure, but record once
+                        logging.debug("scanner generate error for %s %s: %s", pair, interval, wrapper.get("error"))
+                        continue
+
+                    sig = _normalize_signal(wrapper, pair, interval)
                     if sig.get("error"):
                         continue
 
-                    s_type = sig.get("signal")
-                    conf = float(sig.get("confidence", 0.0)) if sig.get("confidence") is not None else 0.0
+                    # determine "strong" by confidence or by text
+                    try:
+                        conf = float(sig.get("confidence", 0.0))
+                    except Exception:
+                        conf = 0.0
+                    s_type = str(sig.get("signal", "")).upper()
 
-                    if s_type in ("LONG", "SHORT") and conf >= AUTO_CONFIDENCE_THRESHOLD:
+                    strong_text_signals = {"STRONG BUY", "STRONG SELL", "LONG", "SHORT"}
+                    if (s_type in strong_text_signals and conf >= AUTO_CONFIDENCE_THRESHOLD) or (conf >= AUTO_CONFIDENCE_THRESHOLD and s_type in ("LONG","SHORT")):
                         try:
                             mark_signal_sent(pair, interval)
                             target = ADMIN_ID if AUTO_SEND_ONLY_ADMIN and ADMIN_ID else None
@@ -503,7 +657,7 @@ def _scanner_loop():
                             logging.exception("Failed to record/send auto signal")
                     # mild throttle to avoid rate limits
                     time.sleep(0.6)
-            # small pause between full cycles so the system can breathe
+            # small pause between full cycles
             time.sleep(2.0)
         except Exception:
             logging.exception("Unhandled error in scanner loop")
@@ -519,11 +673,6 @@ def start_background_scanner():
     _scanner_thread = threading.Thread(target=_scanner_loop, daemon=True)
     _scanner_thread.start()
     logging.info("[SCANNER] Started background scanner thread.")
-    # notify admin
-    try:
-        bot.send_message(ADMIN_ID, _append_brand("▶️ Background market scanner started. Auto-sends will be delivered to admin."))
-    except Exception:
-        logging.exception("notify admin start scanner failed")
 
 def stop_background_scanner():
     global _scanner_thread, _scanner_stop_event
@@ -534,34 +683,11 @@ def stop_background_scanner():
     _scanner_thread.join(timeout=5)
     _scanner_thread = None
     logging.info("[SCANNER] Stop requested and thread joined.")
-    # notify admin
-    try:
-        bot.send_message(ADMIN_ID, _append_brand("⏹ Background market scanner stopped."))
-    except Exception:
-        logging.exception("notify admin stop scanner failed")
 
 # ----- Start polling safely (exported) -----
 def start_bot_polling():
     stop_existing_bot_instances()
     logging.info("[BOT] Starting polling loop...")
-
-    # initial startup notification for admin (if available)
-    try:
-        status_lines = [
-            "🚀 Destiny Trading Empire Bot online",
-            f"Auto-scan TFs: {', '.join(SCAN_INTERVALS)}",
-            f"Pairs tracked: {', '.join(PAIRS[:10])} {'...' if len(PAIRS)>10 else ''}",
-            f"Auto-send threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%",
-        ]
-        if create_brand_image:
-            img = create_brand_image(["Destiny Trading Empire Bot 💎 — Online"])
-            safe_send_with_image(bot, ADMIN_ID, _append_brand("\n".join(status_lines)), img)
-        else:
-            bot.send_message(ADMIN_ID, _append_brand("\n".join(status_lines)))
-    except Exception:
-        logging.exception("startup notify failed")
-
-    # start polling (blocking)
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
