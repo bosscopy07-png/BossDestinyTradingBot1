@@ -216,64 +216,249 @@ def fetch_trending_pairs_branded(limit: int = 10) -> Tuple[Optional[BytesIO], st
         traceback.print_exc()
         return None, f"Error: {e}"
 
-# -------------------------
-# Kline fetcher (multi-exchange)
-# -------------------------
-def _parse_binance_klines(raw) -> pd.DataFrame:
-    cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
-    df = pd.DataFrame(raw, columns=cols)
-    for c in ["open","high","low","close","volume"]:
-        df[c] = df[c].astype(float)
-    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-    return df
+# --- multi-exchange klines helper (replace older fetch_klines_multi) ---
+import traceback
+from typing import Optional
+
+# If ccxt import near top already exists we'll use it
+try:
+    import ccxt
+    HAS_CCXT = True
+except Exception:
+    HAS_CCXT = False
+
+# endpoints already defined earlier: BINANCE_KLINES, BYBIT_KLINES, KUCOIN_KLINES, OKX_KLINES
+
+# helper: normalize symbol for a given exchange
+def _normalize_symbol_for_exchange(symbol: str, exchange: str) -> str:
+    s = symbol.upper().replace("/", "").replace("-", "")
+    # common convention: user supplies BTCUSDT
+    if exchange in ("kucoin", "okx"):
+        # KuCoin and OKX commonly use "BTC-USDT"
+        if s.endswith("USDT"):
+            return s[:-4] + "-USDT"
+        if s.endswith("USD"):  # edge-case
+            return s[:-3] + "-USD"
+        return s  # best-effort
+    elif exchange == "bybit":
+        # Bybit v5 uses "BTCUSDT" for spot - keep as is
+        return s
+    elif exchange == "binance":
+        return s  # Binance uses BTCUSDT
+    else:
+        return s
+
+# helper: kucoin interval mapping
+def _kucoin_interval_map(interval: str) -> str:
+    m = {
+        "1m":"1min", "3m":"3min", "5m":"5min", "15m":"15min", "30m":"30min",
+        "1h":"1hour", "4h":"4hour", "1d":"1day"
+    }
+    return m.get(interval, interval)
+
+# helper: okx interval mapping (OKX uses same like 1m,5m,15m but bar param)
+def _okx_bar_map(interval: str) -> str:
+    # Quick pass-through for common intervals; OKX accepts like '1m','5m','1H','1D' etc.
+    # We'll convert '1h' -> '60m' or use '1H' depending on API expectations; tests show '1H' often ok;
+    # but a simple pass-through is okay for many intervals
+    if interval.endswith("h"):
+        return interval
+    return interval
+
+def _parse_ohlcv_to_df(raw, source: str) -> Optional[pd.DataFrame]:
+    """
+    Common parser attempt for arrays of arrays (time, open, high, low, close, volume)
+    or specific exchange JSON outputs.
+    """
+    try:
+        # Binance style raw list-of-lists
+        if isinstance(raw, list) and raw and isinstance(raw[0], list):
+            # assume standard kline layout for Binance
+            cols = ["open_time","open","high","low","close","volume","close_time","qav","num_trades","taker_base","taker_quote","ignore"]
+            df = pd.DataFrame(raw, columns=cols)
+            for c in ["open","high","low","close","volume"]:
+                df[c] = df[c].astype(float)
+            df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+            return df
+        # Bybit v5 sometimes returns result.list
+        if isinstance(raw, dict):
+            # Bybit v5
+            if "result" in raw and isinstance(raw["result"], dict) and "list" in raw["result"]:
+                arr = raw["result"]["list"]
+                cols = ["open_time","open","high","low","close","volume","turnover"]
+                df = pd.DataFrame(arr, columns=cols)
+                for c in ["open","high","low","close","volume"]:
+                    df[c] = df[c].astype(float)
+                df["open_time"] = pd.to_datetime(df["open_time"], unit="s" if len(str(int(df["open_time"].iloc[0])))<=10 else "ms")
+                return df
+            # KuCoin returns list-of-lists in 'data'
+            if "data" in raw and isinstance(raw["data"], list):
+                # some KuCoin responses are nested as list of lists
+                arr = raw["data"]
+                # KuCoin ordering: [time, open, high, low, close, volume]
+                try:
+                    df = pd.DataFrame(arr, columns=["time","open","close","high","low","volume"])
+                    # reorder to open, high, low, close, volume
+                    df = df.rename(columns={"time":"open_time"})
+                    df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
+                    # fix types
+                    df["open"] = df["open"].astype(float)
+                    df["high"] = df["high"].astype(float)
+                    df["low"] = df["low"].astype(float)
+                    df["close"] = df["close"].astype(float)
+                    df["volume"] = df["volume"].astype(float)
+                    return df[["open_time","open","high","low","close","volume"]]
+                except Exception:
+                    pass
+        # last resort: cannot parse
+        return None
+    except Exception:
+        traceback.print_exc()
+        return None
 
 def fetch_klines_multi(symbol: str = "BTCUSDT", interval: str = "1h", limit: int = 300, exchange: str = "binance") -> Optional[pd.DataFrame]:
     """
-    Robust multi-exchange klines getter. Primary: Binance public. If ccxt is available, use ccxt for the chosen exchange.
+    Robust multi-exchange klines getter. Preferred: ccxt for the named exchange.
+    Fallbacks: exchange-specific public REST (Binance, Bybit v5, KuCoin, OKX).
     Returns pandas DataFrame with columns: open_time, open, high, low, close, volume
     """
     try:
         exchange = (exchange or "binance").lower()
         sess = get_session()
 
-        # Binance direct
-        if exchange == "binance" or not HAS_CCXT:
+        # ----- 1) try ccxt if available (preferred) -----
+        if HAS_CCXT:
+            try:
+                ex_name = exchange
+                # map to ccxt id if needed
+                ccxt_map = {"okx":"okx", "kucoin":"kucoin", "bybit":"bybit", "binance":"binance"}
+                ccxt_id = ccxt_map.get(ex_name, ex_name)
+                ex = getattr(ccxt, ccxt_id)()
+                # no api keys needed for public fetch
+                ex.load_markets()
+                timeframe = interval
+                # ccxt expects symbol like 'BTC/USDT'
+                cc_sym = symbol.replace("USDT", "/USDT").replace("USD", "/USD")
+                ohlcv = ex.fetch_ohlcv(cc_sym, timeframe=timeframe, limit=limit)
+                if ohlcv and isinstance(ohlcv, list):
+                    df = pd.DataFrame(ohlcv, columns=["open_time","open","high","low","close","volume"])
+                    df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+                    for c in ["open","high","low","close","volume"]:
+                        df[c] = df[c].astype(float)
+                    return df
+            except Exception:
+                # fallback quietly to public REST
+                traceback.print_exc()
+
+        # ----- 2) Exchange-specific public REST fallback -----
+        # Binance (same as before)
+        try:
+            if exchange == "binance":
+                url = BINANCE_KLINES
+                r = sess.get(url, params={"symbol": symbol.upper(), "interval": interval, "limit": int(limit)}, timeout=10)
+                r.raise_for_status()
+                raw = r.json()
+                df = _parse_ohlcv_to_df(raw)
+                if df is not None:
+                    return df
+        except Exception:
+            traceback.print_exc()
+
+        # Bybit v5 public
+        try:
+            if exchange == "bybit":
+                url = "https://api.bybit.com/v5/market/kline"
+                params = {"category":"spot", "symbol": symbol.upper(), "interval": interval, "limit": int(limit)}
+                r = sess.get(url, params=params, timeout=10)
+                r.raise_for_status()
+                j = r.json()
+                # bybit returns result.list as array of [start, open, high, low, close, volume]
+                if j.get("result") and j["result"].get("list"):
+                    arr = j["result"]["list"]
+                    df = pd.DataFrame(arr, columns=["open_time","open","high","low","close","volume"])
+                    # bybit returns epoch seconds? sometimes ms; detect by length
+                    # assume seconds if magnitude < 1e12
+                    if isinstance(df["open_time"].iloc[0], (int, float)) and df["open_time"].iloc[0] < 1e12:
+                        df["open_time"] = pd.to_datetime(df["open_time"], unit="s")
+                    else:
+                        df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
+                    for c in ["open","high","low","close","volume"]:
+                        df[c] = df[c].astype(float)
+                    return df
+        except Exception:
+            traceback.print_exc()
+
+        # KuCoin public
+        try:
+            if exchange == "kucoin":
+                ku_sym = _normalize_symbol_for_exchange(symbol, "kucoin")
+                params = {"symbol": ku_sym, "type": _kucoin_interval_map(interval)}
+                r = sess.get(KUCOIN_KLINES, params=params, timeout=10)
+                r.raise_for_status()
+                j = r.json()
+                # KuCoin returns data as list-of-lists usually
+                if isinstance(j.get("data"), list):
+                    arr = j["data"]
+                    # KuCoin often returns [time, open, close, high, low, volume]
+                    # Try to normalize into DataFrame
+                    df = pd.DataFrame(arr)
+                    # ensure we pick columns reliably
+                    if df.shape[1] >= 6:
+                        df = df.iloc[:, :6]
+                        df.columns = ["open_time","open","close","high","low","volume"]
+                        df["open_time"] = pd.to_datetime(df["open_time"].astype(float), unit="s")
+                        # reorder to open, high, low, close, volume
+                        df = df.rename(columns={"close":"close_temp"})
+                        df = df.rename(columns={"open":"open", "high":"high", "low":"low", "close_temp":"close"})
+                        for c in ["open","high","low","close","volume"]:
+                            df[c] = df[c].astype(float)
+                        return df[["open_time","open","high","low","close","volume"]]
+        except Exception:
+            traceback.print_exc()
+
+        # OKX public
+        try:
+            if exchange == "okx":
+                ok_sym = _normalize_symbol_for_exchange(symbol, "okx")
+                params = {"instId": ok_sym, "bar": interval, "limit": int(limit)}
+                r = sess.get(OKX_KLINES, params=params, timeout=10)
+                r.raise_for_status()
+                j = r.json()
+                if j.get("data"):
+                    # OKX returns array of arrays [ts, open, high, low, close, volume, ...]
+                    arr = j["data"]
+                    # choose first 6 cols
+                    df = pd.DataFrame(arr)
+                    if df.shape[1] >= 6:
+                        df = df.iloc[:, :6]
+                        df.columns = ["open_time","open","high","low","close","volume"]
+                        # OKX time may be ms epoch in string
+                        try:
+                            df["open_time"] = pd.to_datetime(df["open_time"].astype(float), unit="ms")
+                        except Exception:
+                            df["open_time"] = pd.to_datetime(df["open_time"].astype(float), unit="s")
+                        for c in ["open","high","low","close","volume"]:
+                            df[c] = df[c].astype(float)
+                        return df[["open_time","open","high","low","close","volume"]]
+        except Exception:
+            traceback.print_exc()
+
+        # final fallback: try Binance one more time
+        try:
             url = BINANCE_KLINES
             r = sess.get(url, params={"symbol": symbol.upper(), "interval": interval, "limit": int(limit)}, timeout=10)
             r.raise_for_status()
-            return _parse_binance_klines(r.json())
-
-        # If ccxt is available, use it for bybit/kucoin/okx
-        if HAS_CCXT:
-            try:
-                ex = None
-                if exchange == "bybit":
-                    ex = ccxt.bybit()
-                elif exchange == "kucoin":
-                    ex = ccxt.kucoin()
-                elif exchange == "okx":
-                    ex = ccxt.okx()
-                else:
-                    ex = ccxt.binance()
-                raw = ex.fetch_ohlcv(symbol.upper(), timeframe=interval, limit=limit)
-                df = pd.DataFrame(raw, columns=["open_time", "open", "high", "low", "close", "volume"])
-                df["open_time"] = pd.to_datetime(df["open_time"], unit="ms")
-                for c in ["open","high","low","close","volume"]:
-                    df[c] = df[c].astype(float)
-                return df
-            except Exception:
-                # fallback to Binance REST if ccxt or specific exchange call fails
-                pass
-
-        # fallback: binance
-        url = BINANCE_KLINES
-        r = sess.get(url, params={"symbol": symbol.upper(), "interval": interval, "limit": int(limit)}, timeout=10)
-        r.raise_for_status()
-        return _parse_binance_klines(r.json())
+            raw = r.json()
+            df = _parse_ohlcv_to_df(raw)
+            return df
+        except Exception:
+            traceback.print_exc()
 
     except Exception:
         traceback.print_exc()
-        return None
+
+    # nothing worked
+    return None
 
 # -------------------------
 # Indicators
