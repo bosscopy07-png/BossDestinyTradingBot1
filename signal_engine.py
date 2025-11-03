@@ -77,7 +77,7 @@ def compute_rsi(series, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def generate_signal(df):
+def generate_signal(df, pair=None):
     if df is None or len(df) < 50:
         return "Error: Insufficient data"
 
@@ -85,11 +85,11 @@ def generate_signal(df):
 
     # Signal logic
     if last["MA20"] > last["MA50"] and last["RSI"] < 70 and last["MACD"] > last["Signal"]:
-        return "STRONG BUY 📈"
+        return f"{pair or ''} → STRONG BUY 📈"
     elif last["MA20"] < last["MA50"] and last["RSI"] > 30 and last["MACD"] < last["Signal"]:
-        return "STRONG SELL 📉"
+        return f"{pair or ''} → STRONG SELL 📉"
     else:
-        return "NO CLEAR SIGNAL ⚖️"
+        return f"{pair or ''} → NO CLEAR SIGNAL ⚖️"
 
 
 # -----------------------------
