@@ -70,18 +70,29 @@ def _safe_generate_signal(symbol: str, interval: str): """ Primary path: use ana
 
 # Optional AI augmentation: if ai_analysis_text exists, ask AI for extra rationale and trust modifier
                 if ai_analysis_text and score > 0.4:
-                    try:
-                        prompt = f"Given the following multi-timeframe analysis for {symbol} on {interval}:\n{res}\nProvide concise trade rationale and, if appropriate, a trust modifier between -0.05 and +0.1 to adjust confidence. Reply JSON: {""}""
-                        ai_resp = ai_analysis_text(prompt)
-                        # Attempt to parse a numeric modifier out of AI response (best-effort)
-                        import re
-                        m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", str(ai_resp))
-                        if m:
-                            mod = float(m.group(1))
-                            score = max(0.0, min(1.0, score + mod))
-                            reasons.append("ai_adj")
-                    except Exception:
-                        logger.exception("AI augmentation failed")
+    try:
+        # Convert res to string safely in case it's a dict
+        res_text = str(res) if not isinstance(res, str) else res
+
+        # Corrected f-string: use double braces {{}} for literal {}
+        prompt = (
+            f"Given the following multi-timeframe analysis for {symbol} on {interval}:\n"
+            f"{res_text}\n"
+            "Provide concise trade rationale and, if appropriate, a trust modifier between -0.05 and +0.1 to adjust confidence. "
+            "Reply JSON: {{}}"
+        )
+
+        ai_resp = ai_analysis_text(prompt)
+
+        # Attempt to parse a numeric modifier out of AI response (best-effort)
+        import re
+        m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", str(ai_resp))
+        if m:
+            mod = float(m.group(1))
+            score = max(0.0, min(1.0, score + mod))
+            reasons.append("ai_adj")
+    except Exception:
+        logger.exception("AI augmentation failed")
 
                 return {
                     "symbol": symbol.upper(),
