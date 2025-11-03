@@ -109,8 +109,16 @@ def get_signals():
     return results
 
 
+def get_latest_signals():
+    """Wrapper for bot_runner to fetch all signals."""
+    return get_signals()
+
+
+# -----------------------------
+# MAIN LOOP (for standalone testing)
+# -----------------------------
 if __name__ == "__main__":
     while True:
         signals = get_signals()
         print("✅ Signals updated:", signals)
-        time.sleep(60 * 15)  # update every 15 minutes
+        time.sleep(60 * 15)
