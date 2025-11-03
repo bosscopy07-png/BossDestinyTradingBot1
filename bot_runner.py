@@ -186,47 +186,47 @@ def _safe_generate_signal(symbol: str, interval: str):
         # 1) Try the multi-TF analyzer (best)
         if analyze_pair_multi_timeframes:
             try:
-                res = analyze_pair_multi_timeframes(symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval])
-                # res should contain combined_signal and combined_score
+                # ask analyzer to include the requested interval first
+                tfs = [interval] + [tf for tf in SCAN_INTERVALS if tf != interval]
+                res = analyze_pair_multi_timeframes(symbol, timeframes=tfs)
                 if isinstance(res, dict) and not res.get("error"):
                     combined = res.get("combined_signal", "HOLD")
-                    score = float(res.get("combined_score", 0.0))
-                    # pick 1h close if available, else any close
+                    score = float(res.get("combined_score", 0.0) or 0.0)
+                    # try to pick an entry price (prefer the interval)
                     entry = None
                     try:
-                        entry = res["analysis"].get(interval, {}).get("close") or next(iter(res["analysis"].values())).get("close")
+                        entry = res.get("analysis", {}).get(interval, {}).get("close") \
+                                or next(iter(res.get("analysis", {}).values())).get("close")
                     except Exception:
                         entry = None
-                    # use sl/tp1 from 1h if exists else from interval analysis
-                    sl = None; tp1 = None
+                    sl = None
+                    tp1 = None
                     try:
-                        sl = res["analysis"].get("1h", {}).get("sl") or res["analysis"].get(interval, {}).get("sl")
-                        tp1 = res["analysis"].get("1h", {}).get("tp1") or res["analysis"].get(interval, {}).get("tp1")
+                        sl = res.get("analysis", {}).get("1h", {}).get("sl") or res.get("analysis", {}).get(interval, {}).get("sl")
+                        tp1 = res.get("analysis", {}).get("1h", {}).get("tp1") or res.get("analysis", {}).get(interval, {}).get("tp1")
                     except Exception:
                         pass
                     reasons = []
-                    # compile reasons across timeframes (top few)
                     try:
-                        for tf, info in res.get("analysis", {}).items():
-                            if isinstance(info, dict):
-                                reasons.extend(info.get("reasons", []))
+                        for tf_info in (res.get("analysis") or {}).values():
+                            if isinstance(tf_info, dict):
+                                reasons.extend(tf_info.get("reasons", []) or [])
                     except Exception:
                         pass
                     return {
                         "symbol": symbol.upper(),
                         "interval": interval,
                         "signal": "LONG" if "LONG" in combined or "STRONG_LONG" in combined else ("SHORT" if "SHORT" in combined or "STRONG_SHORT" in combined else "HOLD"),
-                        "entry": float(entry) if entry else None,
-                        "sl": float(sl) if sl else None,
-                        "tp1": float(tp1) if tp1 else None,
+                        "entry": float(entry) if entry is not None else None,
+                        "sl": float(sl) if sl is not None else None,
+                        "tp1": float(tp1) if tp1 is not None else None,
                         "confidence": float(score),
-                        "reasons": list(dict.fromkeys(reasons))  # dedupe
+                        "reasons": list(dict.fromkeys(reasons))
                     }
             except Exception:
-                logger.exception("analyze_pair_multi_timeframes failed; falling back")
+                logging.exception("analyze_pair_multi_timeframes failed; falling back to per-exchange klines")
 
-        # 2) Fallback: try to fetch klines for exchange choices and run legacy generate_signal
-        # Try multiple exchanges to get usable data
+        # 2) Fallback: try to fetch klines for a list of exchanges and run legacy_generate_signal
         exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
         if fetch_klines_multi:
             for ex in exchanges_to_try:
@@ -234,59 +234,66 @@ def _safe_generate_signal(symbol: str, interval: str):
                     df = fetch_klines_multi(symbol, interval, limit=200, exchange=ex)
                     if df is None or df.empty or "close" not in df:
                         continue
-                    # If legacy_generate_signal exists, try it
+
+                    # If legacy engine available, try it
                     if legacy_generate_signal:
                         try:
-                            # legacy_generate_signal sometimes expects just df and returns string
                             out = legacy_generate_signal(df, pair=symbol)
-                            # normalize output string to detect LONG/SHORT/HOLD and make numeric fields
-                            sig_text = str(out)
-                            if "BUY" in sig_text.upper():
+                            sig_text = str(out or "")
+                            up = sig_text.upper()
+                            if "BUY" in up or "STRONG BUY" in up:
                                 sig = "LONG"
-                            elif "SELL" in sig_text.upper():
+                            elif "SELL" in up or "STRONG SELL" in up:
                                 sig = "SHORT"
                             else:
                                 sig = "HOLD"
-                            # basic SL/TP using ATR
+
+                            # basic SL/TP using ATR or simple range
                             try:
-                                # compute ATR simple
                                 highs = df["high"].astype(float)
                                 lows = df["low"].astype(float)
                                 closes = df["close"].astype(float)
                                 atr_val = (highs - lows).rolling(14).mean().iloc[-1]
                                 last = float(closes.iloc[-1])
                                 if sig == "LONG":
-                                    sl = last - (atr_val * 1.5)
-                                    tp1 = last + (atr_val * 1.5)
+                                    sl = last - (atr_val * 1.5) if (atr_val is not None and not np.isnan(atr_val)) else last * 0.995
+                                    tp1 = last + (atr_val * 1.5) if (atr_val is not None and not np.isnan(atr_val)) else last * 1.005
                                 elif sig == "SHORT":
-                                    sl = last + (atr_val * 1.5)
-                                    tp1 = last - (atr_val * 1.5)
+                                    sl = last + (atr_val * 1.5) if (atr_val is not None and not np.isnan(atr_val)) else last * 1.005
+                                    tp1 = last - (atr_val * 1.5) if (atr_val is not None and not np.isnan(atr_val)) else last * 0.995
                                 else:
                                     sl = last * 0.995
                                     tp1 = last * 1.005
                             except Exception:
-                                sl = None; tp1 = None
+                                last = float(df["close"].astype(float).iloc[-1])
+                                sl = last * 0.995
+                                tp1 = last * 1.005
+
                             return {
                                 "symbol": symbol.upper(),
                                 "interval": interval,
                                 "signal": sig,
-                                "entry": float(closes.iloc[-1]),
-                                "sl": float(sl) if sl else None,
-                                "tp1": float(tp1) if tp1 else None,
+                                "entry": float(df["close"].astype(float).iloc[-1]),
+                                "sl": float(sl) if sl is not None else None,
+                                "tp1": float(tp1) if tp1 is not None else None,
                                 "confidence": 0.3,
                                 "reasons": [sig_text]
                             }
                         except Exception:
-                            logger.exception("legacy_generate_signal failed on df")
+                            logging.exception("legacy_generate_signal failed on df; trying next exchange")
                             continue
-            # if no df succeeded, return error
+                except Exception:
+                    logging.exception("fetch_klines_multi failed for exchange %s", ex)
+                    continue
+
+            # if we exhaust exchanges without success
             return {"error": "no_data_on_exchanges"}
         else:
             return {"error": "no_fetch_klines_available"}
-    except Exception as exc:
-        logger.exception("_safe_generate_signal unexpected error")
-        return {"error": str(exc)}
 
+    except Exception as exc:
+        logging.exception("_safe_generate_signal unexpected error")
+        return {"error": str(exc)}
 # ----- recording & messaging -----
 def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
     """Record a signal in storage and send it (image + caption)."""
