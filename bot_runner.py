@@ -1,591 +1,353 @@
-# bot_runner.py (fixed)
-import os
-import time
-import threading
-import traceback
-import requests
-import logging
-from datetime import datetime
-import telebot
-from telebot import types
-import json
-import re
+import os import time import threading import traceback import requests import logging from datetime import datetime import telebot from telebot import types import json import re
 
-# ----- Branding and global constants -----
-BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot \U0001f48e</b>"
+----- Branding and global constants -----
 
-# Config from env (with sane defaults)
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-PAIRS = os.getenv(
-    "PAIRS",
-    "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,MATICUSDT,ADAUSDT",
-).split(",")
+BRAND_TAG = "
 
-# scan all timeframes per requirement
-SCAN_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
-SIGNAL_INTERVAL_DEFAULT = os.getenv("SIGNAL_INTERVAL", "1h")
-COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
-RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
-CHALLENGE_START = float(os.getenv("CHALLENGE_START", "100.0"))
+— <b>Destiny Trading Empire Bot 💎</b>"
 
-# Auto-send parameters
-AUTO_CONFIDENCE_THRESHOLD = float(
-    os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90")
-)  # 0.90 = 90%
-AUTO_SEND_ONLY_ADMIN = os.getenv("AUTO_SEND_ONLY_ADMIN", "True").lower() in (
-    "1",
-    "true",
-    "yes",
-)
+Config from env (with sane defaults)
 
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable required")
+BOT_TOKEN = os.getenv("BOT_TOKEN") ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) PAIRS = os.getenv( "PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,MATICUSDT,ADAUSDT", ).split(",")
 
-# ----- Logging & storage init -----
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger("bot_runner")
+scan all timeframes per requirement
 
-# Import optional project modules (if missing we fallback gracefully)
-try:
-    from market_providers import (
-        fetch_trending_pairs_branded,
-        fetch_klines_multi,
-        get_session,
-        fetch_trending_pairs_text,
-        analyze_pair_multi_timeframes,
-        detect_strong_signals,
-        generate_branded_signal_image,
-    )
+SCAN_INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"] SIGNAL_INTERVAL_DEFAULT = os.getenv("SIGNAL_INTERVAL", "1h") COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30")) RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1")) CHALLENGE_START = float(os.getenv("CHALLENGE_START", "100.0"))
+
+Auto-send parameters
+
+AUTO_CONFIDENCE_THRESHOLD = float( os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90") )  # 0.90 = 90% AUTO_SEND_ONLY_ADMIN = os.getenv("AUTO_SEND_ONLY_ADMIN", "True").lower() in ( "1", "true", "yes", )
+
+if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN environment variable required")
+
+----- Logging & storage init -----
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s") logger = logging.getLogger("bot_runner")
+
+Import optional project modules (if missing we fallback gracefully)
+
+try: from market_providers import ( fetch_trending_pairs_branded, fetch_klines_multi, get_session, fetch_trending_pairs_text, analyze_pair_multi_timeframes, detect_strong_signals, generate_branded_signal_image, ) except Exception: fetch_trending_pairs_branded = None fetch_klines_multi = None get_session = None fetch_trending_pairs_text = None analyze_pair_multi_timeframes = None detect_strong_signals = None generate_branded_signal_image = None logger.exception("market_providers import failed")
+
+try: from image_utils import build_signal_image, safe_send_with_image, create_brand_image except Exception: build_signal_image = None safe_send_with_image = None create_brand_image = None logger.exception("image_utils import failed")
+
+Try to import signal_engine with multiple names (legacy and modern)
+
+try: from signal_engine import ( generate_signal as legacy_generate_signal, generate_signal_multi as generate_signal_multi, detect_strong_signals as se_detect_strong_signals, register_send_callback as register_send_callback, start_auto_scanner as se_start_auto_scanner, ) except Exception: # fallback: import what exists, don't fail hard try: from signal_engine import generate_signal as legacy_generate_signal except Exception: legacy_generate_signal = None try: from signal_engine import generate_signal_multi as generate_signal_multi except Exception: generate_signal_multi = None try: from signal_engine import detect_strong_signals as se_detect_strong_signals except Exception: se_detect_strong_signals = None try: from signal_engine import register_send_callback as register_send_callback except Exception: register_send_callback = None try: from signal_engine import start_auto_scanner as se_start_auto_scanner except Exception: se_start_auto_scanner = None logger.exception("signal_engine partial import attempted")
+
+try: from storage import ensure_storage, load_data, save_data, record_pnl_screenshot except Exception: ensure_storage = None load_data = None save_data = None record_pnl_screenshot = None logger.exception("storage import failed")
+
+Safe import of ai_client (may expose multiple helpers)
+
+try: from ai_client import ( ai_analysis_text, ExchangeStreamer, ImageAnalyzer, SignalGenerator, analyze_image_and_signal, ) except Exception: ai_analysis_text = None ExchangeStreamer = None ImageAnalyzer = None SignalGenerator = None analyze_image_and_signal = None logger.exception("ai_client import failed")
+
+try: from pro_features import ( top_gainers_pairs, fear_and_greed_index, futures_leverage_suggestion, quickchart_price_image, ai_market_brief_text, ) except Exception: top_gainers_pairs = None fear_and_greed_index = None futures_leverage_suggestion = None quickchart_price_image = None ai_market_brief_text = None logger.exception("pro_features import failed")
+
+Scheduler (for auto-briefs)
+
+try: from scheduler import start_scheduler, stop_scheduler except Exception: start_scheduler = None stop_scheduler = None logger.exception("scheduler import failed")
+
+ensure storage directory/data if module available
+
+if ensure_storage: try: ensure_storage() except Exception: logger.exception("ensure_storage failed")
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML") _last_signal_time = {}  # dict mapping (symbol|interval) -> datetime of last auto-send _scanner_thread = None _scanner_stop_event = threading.Event()
+
+----- helpers -----
+
+def _append_brand(text: str) -> str: if BRAND_TAG.strip() not in text: return text + BRAND_TAG return text
+
+def _send_branded(chat_id, text, lines_for_image=None, reply_markup=None): """ Always attempt to send a small branded image + caption. If image can't be created, send text only (with brand). lines_for_image is a list of lines used to build a brand image if create_brand_image exists. """ try: caption = _append_brand(text) if create_brand_image and lines_for_image: try: img = create_brand_image(lines_for_image, title="Destiny Trading Empire Bot 💎") if safe_send_with_image: safe_send_with_image(bot, chat_id, caption, img, reply_markup=reply_markup) return else: try: img.seek(0) except Exception: pass bot.send_photo(chat_id, img, caption=caption, reply_markup=reply_markup) return except Exception: logger.exception("create_brand_image failed; falling back to text")
+
+# fallback: if there is an image buffer passed directly via safe_send_with_image
+    if safe_send_with_image and isinstance(lines_for_image, (bytes, bytearray)):
+        safe_send_with_image(bot, chat_id, caption, lines_for_image, reply_markup=reply_markup)
+        return
+
+    # final fallback: send text message
+    bot.send_message(chat_id, caption, reply_markup=reply_markup)
 except Exception:
-    fetch_trending_pairs_branded = None
-    fetch_klines_multi = None
-    get_session = None
-    fetch_trending_pairs_text = None
-    analyze_pair_multi_timeframes = None
-    detect_strong_signals = None
-    generate_branded_signal_image = None
-    logger.exception("market_providers import failed")
-
-try:
-    from image_utils import build_signal_image, safe_send_with_image, create_brand_image
-except Exception:
-    build_signal_image = None
-    safe_send_with_image = None
-    create_brand_image = None
-    logger.exception("image_utils import failed")
-
-# Try to import signal_engine with multiple names (legacy and modern)
-try:
-    from signal_engine import (
-        generate_signal as legacy_generate_signal,
-        generate_signal_multi as generate_signal_multi,
-        detect_strong_signals as se_detect_strong_signals,
-        register_send_callback as register_send_callback,
-        start_auto_scanner as se_start_auto_scanner,
-    )
-except Exception:
-    # fallback: import what exists, don't fail hard
+    logger.exception("Failed to _send_branded")
     try:
-        from signal_engine import generate_signal as legacy_generate_signal
+        bot.send_message(chat_id, _append_brand("⚠️ Failed to deliver message."))
     except Exception:
-        legacy_generate_signal = None
-    try:
-        from signal_engine import generate_signal_multi as generate_signal_multi
-    except Exception:
-        generate_signal_multi = None
-    try:
-        from signal_engine import detect_strong_signals as se_detect_strong_signals
-    except Exception:
-        se_detect_strong_signals = None
-    try:
-        from signal_engine import register_send_callback as register_send_callback
-    except Exception:
-        register_send_callback = None
-    try:
-        from signal_engine import start_auto_scanner as se_start_auto_scanner
-    except Exception:
-        se_start_auto_scanner = None
-    logger.exception("signal_engine partial import attempted")
+        pass
 
-try:
-    from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
-except Exception:
-    ensure_storage = None
-    load_data = None
-    save_data = None
-    record_pnl_screenshot = None
-    logger.exception("storage import failed")
+def stop_existing_bot_instances(): """Try clear pending getUpdates sessions to reduce 409 conflicts.""" try: url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1" requests.get(url, timeout=5) logger.info("[BOT] Attempted to stop other bot sessions (getUpdates offset -1).") except Exception as e: logger.warning(f"[BOT] Could not call Telegram getUpdates clear: {e}")
 
-# Safe import of ai_client (may expose multiple helpers)
-try:
-    from ai_client import (
-        ai_analysis_text,
-        ExchangeStreamer,
-        ImageAnalyzer,
-        SignalGenerator,
-        analyze_image_and_signal,
-    )
-except Exception:
-    ai_analysis_text = None
-    ExchangeStreamer = None
-    ImageAnalyzer = None
-    SignalGenerator = None
-    analyze_image_and_signal = None
-    logger.exception("ai_client import failed")
+def can_send_signal(symbol: str, interval: str) -> bool: """Respect cooldown per symbol+interval (auto-sends).""" key = f"{symbol}|{interval}" last = _last_signal_time.get(key) if not last: return True return (datetime.utcnow() - last).total_seconds() > COOLDOWN_MIN * 60
 
-try:
-    from pro_features import (
-        top_gainers_pairs,
-        fear_and_greed_index,
-        futures_leverage_suggestion,
-        quickchart_price_image,
-        ai_market_brief_text,
-    )
-except Exception:
-    top_gainers_pairs = None
-    fear_and_greed_index = None
-    futures_leverage_suggestion = None
-    quickchart_price_image = None
-    ai_market_brief_text = None
-    logger.exception("pro_features import failed")
+def mark_signal_sent(symbol: str, interval: str): key = f"{symbol}|{interval}" _last_signal_time[key] = datetime.utcnow()
 
-# Scheduler (for auto-briefs)
-try:
-    from scheduler import start_scheduler, stop_scheduler
-except Exception:
-    start_scheduler = None
-    stop_scheduler = None
-    logger.exception("scheduler import failed")
+def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent: float): risk_amount = (balance * risk_percent) / 100.0 diff = None try: diff = abs(entry - sl) except Exception: diff = None if not diff or diff <= 1e-12: return round(risk_amount, 8), 0.0 pos_size = risk_amount / diff return round(risk_amount, 8), round(pos_size, 8)
 
-# ensure storage directory/data if module available
-if ensure_storage:
-    try:
-        ensure_storage()
-    except Exception:
-        logger.exception("ensure_storage failed")
+----- signal generation integration -----
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-_last_signal_time = {}  # dict mapping (symbol|interval) -> datetime of last auto-send
-_scanner_thread = None
-_scanner_stop_event = threading.Event()
+def _safe_generate_signal(symbol: str, interval: str): """ Primary path: use analyze_pair_multi_timeframes() from market_providers to get a multi-TF analysis. If that fails, fallback to fetching klines and legacy signal_engine. Returns a standardized dict: { symbol, interval, signal, entry, sl, tp1, confidence, reasons } """ try: # 1) Try the multi-TF analyzer (best) if analyze_pair_multi_timeframes: try: res = analyze_pair_multi_timeframes( symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval] ) if isinstance(res, dict) and not res.get("error"): combined = res.get("combined_signal", "HOLD") score = float(res.get("combined_score", 0.0))
 
-# ----- helpers -----
-
-
-def _append_brand(text: str) -> str:
-    if BRAND_TAG.strip() not in text:
-        return text + BRAND_TAG
-    return text
-
-
-def _send_branded(chat_id, text, lines_for_image=None, reply_markup=None):
-    """
-    Always attempt to send a small branded image + caption. If image can't be created, send text only (with brand).
-    lines_for_image is a list of lines used to build a brand image if create_brand_image exists.
-    """
-    try:
-        caption = _append_brand(text)
-        if create_brand_image and lines_for_image:
-            try:
-                img = create_brand_image(lines_for_image, title="Destiny Trading Empire Bot \U0001f48e")
-                if safe_send_with_image:
-                    safe_send_with_image(bot, chat_id, caption, img, reply_markup=reply_markup)
-                    return
-                else:
-                    try:
-                        img.seek(0)
-                    except Exception:
-                        pass
-                    bot.send_photo(chat_id, img, caption=caption, reply_markup=reply_markup)
-                    return
-            except Exception:
-                logger.exception("create_brand_image failed; falling back to text")
-
-        # fallback: if there is an image buffer passed directly via safe_send_with_image
-        if safe_send_with_image and isinstance(lines_for_image, (bytes, bytearray)):
-            safe_send_with_image(bot, chat_id, caption, lines_for_image, reply_markup=reply_markup)
-            return
-
-        # final fallback: send text message
-        bot.send_message(chat_id, caption, reply_markup=reply_markup)
-    except Exception:
-        logger.exception("Failed to _send_branded")
-        try:
-            bot.send_message(chat_id, _append_brand("\u26A0\uFE0F Failed to deliver message."))
-        except Exception:
-            pass
-
-
-def stop_existing_bot_instances():
-    """Try clear pending getUpdates sessions to reduce 409 conflicts."""
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1"
-        requests.get(url, timeout=5)
-        logger.info("[BOT] Attempted to stop other bot sessions (getUpdates offset -1).")
-    except Exception as e:
-        logger.warning(f"[BOT] Could not call Telegram getUpdates clear: {e}")
-
-
-def can_send_signal(symbol: str, interval: str) -> bool:
-    """Respect cooldown per symbol+interval (auto-sends)."""
-    key = f"{symbol}|{interval}"
-    last = _last_signal_time.get(key)
-    if not last:
-        return True
-    return (datetime.utcnow() - last).total_seconds() > COOLDOWN_MIN * 60
-
-
-def mark_signal_sent(symbol: str, interval: str):
-    key = f"{symbol}|{interval}"
-    _last_signal_time[key] = datetime.utcnow()
-
-
-def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent: float):
-    risk_amount = (balance * risk_percent) / 100.0
-    diff = None
-    try:
-        diff = abs(entry - sl)
-    except Exception:
-        diff = None
-    if not diff or diff <= 1e-12:
-        return round(risk_amount, 8), 0.0
-    pos_size = risk_amount / diff
-    return round(risk_amount, 8), round(pos_size, 8)
-
-
-# ----- signal generation integration -----
-
-
-def _safe_generate_signal(symbol: str, interval: str):
-    """
-    Primary path: use analyze_pair_multi_timeframes() from market_providers to get a multi-TF analysis.
-    If that fails, fallback to fetching klines and legacy signal_engine.
-    Returns a standardized dict: { symbol, interval, signal, entry, sl, tp1, confidence, reasons }
-    """
-    try:
-        # 1) Try the multi-TF analyzer (best)
-        if analyze_pair_multi_timeframes:
-            try:
-                res = analyze_pair_multi_timeframes(
-                    symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval]
-                )
-                if isinstance(res, dict) and not res.get("error"):
-                    combined = res.get("combined_signal", "HOLD")
-                    score = float(res.get("combined_score", 0.0))
-
-                    # pick entry/sl/tp1 from analysis if available
-                    entry = None
-                    try:
-                        entry = (
-                            res["analysis"].get(interval, {}).get("close")
-                            or next(iter(res["analysis"].values())).get("close")
-                        )
-                    except Exception:
-                        entry = None
-
-                    sl = None
-                    tp1 = None
-                    try:
-                        sl = (
-                            res["analysis"].get("1h", {}).get("sl")
-                            or res["analysis"].get(interval, {}).get("sl")
-                        )
-                        tp1 = (
-                            res["analysis"].get("1h", {}).get("tp1")
-                            or res["analysis"].get(interval, {}).get("tp1")
-                        )
-                    except Exception:
-                        pass
-
-                    reasons = []
-                    try:
-                        for tf, info in res.get("analysis", {}).items():
-                            if isinstance(info, dict):
-                                reasons.extend(info.get("reasons", []))
-                    except Exception:
-                        pass
-
-                    # Optional AI augmentation: if ai_analysis_text exists, ask AI for extra rationale and trust modifier
-                    if ai_analysis_text and score > 0.4:
-                        try:
-                            # Convert res to JSON text safely
-                            res_text = json.dumps(res, indent=2) if not isinstance(res, str) else res
-
-                            # Use literal braces for JSON example in f-string by doubling them
-                            prompt = (
-                                f"Given the following multi-timeframe analysis for {symbol} on {interval}:\n"
-                                f"{res_text}\n"
-                                "Provide concise trade rationale and, if appropriate, a trust modifier between -0.05 and +0.1 to adjust confidence. "
-                                "Reply JSON: {{}}"
-                            )
-
-                            ai_resp = ai_analysis_text(prompt)
-
-                            # Attempt to parse a numeric modifier out of AI response (best-effort)
-                            m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", str(ai_resp))
-                            if m:
-                                mod = float(m.group(1))
-                                score = max(0.0, min(1.0, score + mod))
-                                reasons.append("ai_adj")
-                        except Exception:
-                            logger.exception("AI augmentation failed")
-
-                    return {
-                        "symbol": symbol.upper(),
-                        "interval": interval,
-                        "signal": "LONG"
-                        if "LONG" in combined or "STRONG_LONG" in combined
-                        else ("SHORT" if "SHORT" in combined or "STRONG_SHORT" in combined else "HOLD"),
-                        "entry": float(entry) if entry else None,
-                        "sl": float(sl) if sl else None,
-                        "tp1": float(tp1) if tp1 else None,
-                        "confidence": float(score),
-                        "reasons": list(dict.fromkeys(reasons)),
-                    }
-            except Exception:
-                logger.exception("analyze_pair_multi_timeframes failed; falling back")
-
-        # 2) Fallback: try to fetch klines for exchange choices and run legacy generate_signal
-        exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
-        if fetch_klines_multi:
-            for ex in exchanges_to_try:
+# pick entry/sl/tp1 from analysis if available
+                entry = None
                 try:
-                    df = fetch_klines_multi(symbol, interval, limit=200, exchange=ex)
-                    if df is None:
-                        continue
-                    if hasattr(df, "empty") and df.empty:
-                        continue
-                    if "close" not in df:
-                        continue
-
-                    if legacy_generate_signal:
-                        try:
-                            out = (
-                                legacy_generate_signal(df, pair=symbol)
-                                if callable(legacy_generate_signal)
-                                else legacy_generate_signal
-                            )
-                            sig_text = str(out)
-                            if "BUY" in sig_text.upper() or "STRONG BUY" in sig_text.upper():
-                                sig = "LONG"
-                            elif "SELL" in sig_text.upper():
-                                sig = "SHORT"
-                            else:
-                                sig = "HOLD"
-
-                            # basic SL/TP using ATR-like estimation
-                            try:
-                                highs = df["high"].astype(float)
-                                lows = df["low"].astype(float)
-                                closes = df["close"].astype(float)
-                                atr_val = (highs - lows).rolling(14).mean().iloc[-1]
-                                last = float(closes.iloc[-1])
-                                if sig == "LONG":
-                                    sl = last - (atr_val * 1.5)
-                                    tp1 = last + (atr_val * 1.5)
-                                elif sig == "SHORT":
-                                    sl = last + (atr_val * 1.5)
-                                    tp1 = last - (atr_val * 1.5)
-                                else:
-                                    sl = last * 0.995
-                                    tp1 = last * 1.005
-                            except Exception:
-                                sl = None
-                                tp1 = None
-
-                            return {
-                                "symbol": symbol.upper(),
-                                "interval": interval,
-                                "signal": sig,
-                                "entry": float(closes.iloc[-1]),
-                                "sl": float(sl) if sl else None,
-                                "tp1": float(tp1) if tp1 else None,
-                                "confidence": 0.3,
-                                "reasons": [sig_text],
-                            }
-                        except Exception:
-                            logger.exception("legacy_generate_signal failed on df")
-                            continue
+                    entry = (
+                        res["analysis"].get(interval, {}).get("close")
+                        or next(iter(res["analysis"].values())).get("close")
+                    )
                 except Exception:
-                    logger.exception("fetch_klines_multi attempt failed")
-                    continue
-            return {"error": "no_data_on_exchanges"}
-        else:
-            return {"error": "no_fetch_klines_available"}
-    except Exception as exc:
-        logger.exception("_safe_generate_signal unexpected error")
-        return {"error": str(exc)}
+                    entry = None
 
-
-# ----- recording & messaging -----
-
-
-def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
-    """Record a signal in storage and send it (image + caption)."""
-    # storage read
-    try:
-        d = load_data() if load_data else {}
-    except Exception:
-        d = {}
-
-    sig_id = f"S{int(time.time())}"
-    balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
-
-    # risk and pos
-    risk_amt, pos_size = compute_risk_and_size(sig.get("entry") or 0.0, sig.get("sl") or 0.0, balance, RISK_PERCENT)
-
-    rec = {
-        "id": sig_id,
-        "signal": sig,
-        "time": datetime.utcnow().isoformat(),
-        "risk_amt": risk_amt,
-        "pos_size": pos_size,
-        "user": user_id or ADMIN_ID,
-        "auto": bool(auto),
-    }
-
-    # save record
-    try:
-        if isinstance(d, dict):
-            d.setdefault("signals", []).append(rec)
-            d.setdefault("stats", {})
-            d["stats"]["total_signals"] = d["stats"].get("total_signals", 0) + 1
-            if save_data:
-                save_data(d)
-    except Exception:
-        logger.exception("Failed to save signal record")
-
-    # Build caption
-    try:
-        confidence_pct = int(sig.get("confidence", 0) * 100)
-    except Exception:
-        confidence_pct = 0
-
-    caption = (
-        f"\uDD25 <b>Destiny Trading Empire — Signal</b>\n"
-        f"ID: {sig_id}\nPair: {sig.get('symbol')} | TF: {sig.get('interval')}\n"
-        f"Signal: <b>{sig.get('signal')}</b>\nEntry: {sig.get('entry') or 'N/A'} | SL: {sig.get('sl') or 'N/A'} | TP1: {sig.get('tp1') or 'N/A'}\n"
-        f"Confidence: {confidence_pct}% | Risk (USD): {risk_amt}\n"
-        f"Reasons: {', '.join(sig.get('reasons', []) or ['None'])}\n"
-    )
-    caption = _append_brand(caption)
-
-    # Image creation
-    img = None
-    try:
-        if generate_branded_signal_image and isinstance(sig, dict):
-            try:
-                img_buf, _ = generate_branded_signal_image(
-                    {
-                        "symbol": sig.get("symbol"),
-                        "analysis": None,
-                        "combined_score": sig.get("confidence", 0),
-                        "combined_signal": sig.get("signal"),
-                        "sl": sig.get("sl"),
-                        "tp1": sig.get("tp1"),
-                        "image": None,
-                        "caption_lines": [f"{sig.get('symbol')} | {sig.get('interval')} | {sig.get('signal')}"],
-                    }
-                )
-                if img_buf:
-                    img = img_buf
-            except Exception:
-                logger.exception("generate_branded_signal_image failed")
-
-        if not img and build_signal_image:
-            try:
-                img = build_signal_image(sig)
-            except Exception:
-                logger.exception("build_signal_image failed")
-    except Exception:
-        logger.exception("build_signal_image wrapper failed")
-
-    # Keyboard for message
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("\U0001F4F7 Link PnL", callback_data=f"link_{sig_id}"))
-    kb.add(types.InlineKeyboardButton("\U0001F916 AI Details", callback_data=f"ai_{sig_id}"))
-    kb.add(types.InlineKeyboardButton("\U0001F501 Share", switch_inline_query=f"{sig.get('symbol')}"))
-
-    # send (use safe_send_with_image if available)
-    try:
-        if safe_send_with_image:
-            safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
-        else:
-            if img:
+                sl = None
+                tp1 = None
                 try:
-                    img.seek(0)
+                    sl = (
+                        res["analysis"].get("1h", {}).get("sl")
+                        or res["analysis"].get(interval, {}).get("sl")
+                    )
+                    tp1 = (
+                        res["analysis"].get("1h", {}).get("tp1")
+                        or res["analysis"].get(interval, {}).get("tp1")
+                    )
                 except Exception:
                     pass
-                bot.send_photo(chat_id or ADMIN_ID, img, caption=caption, reply_markup=kb)
-            else:
-                bot.send_message(chat_id or ADMIN_ID, caption, reply_markup=kb)
-    except Exception:
-        logger.exception("Failed to send signal message")
 
-    # optionally send a quick AI rationale follow-up if available
-    try:
-        if ai_analysis_text and sig and not sig.get("error"):
-            prompt = f"Provide concise trade rationale for this signal:\n{json.dumps(sig, default=str)}"
-            ai_text = ai_analysis_text(prompt)
-            if ai_text:
-                follow = _append_brand(f"\U0001F916 AI Rationale:\n{ai_text}")
-                bot.send_message(chat_id or ADMIN_ID, follow)
-    except Exception:
-        logger.exception("AI rationale follow-up failed")
+                reasons = []
+                try:
+                    for tf, info in res.get("analysis", {}).items():
+                        if isinstance(info, dict):
+                            reasons.extend(info.get("reasons", []))
+                except Exception:
+                    pass
 
-    return sig_id
+                # Optional AI augmentation: if ai_analysis_text exists, ask AI for extra rationale and trust modifier
+                if ai_analysis_text and score > 0.4:
+                    try:
+                        # Convert res to JSON text safely
+                        res_text = json.dumps(res, indent=2) if not isinstance(res, str) else res
 
+                        # Use literal braces for JSON example in f-string by doubling them
+                        prompt = (
+                            f"Given the following multi-timeframe analysis for {symbol} on {interval}:
 
-# ----- keyboard UI -----
+" f"{res_text} " "Provide concise trade rationale and, if appropriate, a trust modifier between -0.05 and +0.1 to adjust confidence. " "Reply JSON: {{}}" )
 
+ai_resp = ai_analysis_text(prompt)
 
-def main_keyboard():
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("\U0001F4C8 Get Signals", callback_data="get_signal"),
-        types.InlineKeyboardButton("\U0001F50E Scan Top 4", callback_data="scan_top4"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\u2699\ufe0f Bot Status", callback_data="bot_status"),
-        types.InlineKeyboardButton("\U0001F680 Trending Pairs", callback_data="trending"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\U0001F4F0 Market News", callback_data="market_news"),
-        types.InlineKeyboardButton("\U0001F4C3 My Challenge", callback_data="challenge_status"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\U0001F4F7 Upload PnL", callback_data="pnl_upload"),
-        types.InlineKeyboardButton("\U0001F4CB History", callback_data="history"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\U0001F916 AI Market Brief", callback_data="ask_ai"),
-        types.InlineKeyboardButton("\U0001F504 Refresh Bot", callback_data="refresh_bot"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\u25B6 Start Auto Scanner", callback_data="start_auto_brief"),
-        types.InlineKeyboardButton("\u23F9 Stop Auto Scanner", callback_data="stop_auto_brief"),
-    )
-    kb.add(
-        types.InlineKeyboardButton("\U0001F4E3 Start Auto Briefs", callback_data="start_auto_brief_scheduler"),
-        types.InlineKeyboardButton("\u26D4 Stop Auto Briefs", callback_data="stop_auto_brief_scheduler"),
-    )
-    return kb
+                        # Attempt to parse a numeric modifier out of AI response (best-effort)
+                        m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", str(ai_resp))
+                        if m:
+                            mod = float(m.group(1))
+                            score = max(0.0, min(1.0, score + mod))
+                            reasons.append("ai_adj")
+                    except Exception:
+                        logger.exception("AI augmentation failed")
 
+                return {
+                    "symbol": symbol.upper(),
+                    "interval": interval,
+                    "signal": "LONG"
+                    if "LONG" in combined or "STRONG_LONG" in combined
+                    else ("SHORT" if "SHORT" in combined or "STRONG_SHORT" in combined else "HOLD"),
+                    "entry": float(entry) if entry else None,
+                    "sl": float(sl) if sl else None,
+                    "tp1": float(tp1) if tp1 else None,
+                    "confidence": float(score),
+                    "reasons": list(dict.fromkeys(reasons)),
+                }
+        except Exception:
+            logger.exception("analyze_pair_multi_timeframes failed; falling back")
 
-# --- Telegram handlers ---
+    # 2) Fallback: try to fetch klines for exchange choices and run legacy generate_signal
+    exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
+    if fetch_klines_multi:
+        for ex in exchanges_to_try:
+            try:
+                df = fetch_klines_multi(symbol, interval, limit=200, exchange=ex)
+                if df is None:
+                    continue
+                if hasattr(df, "empty") and df.empty:
+                    continue
+                if "close" not in df:
+                    continue
+
+                if legacy_generate_signal:
+                    try:
+                        out = (
+                            legacy_generate_signal(df, pair=symbol)
+                            if callable(legacy_generate_signal)
+                            else legacy_generate_signal
+                        )
+                        sig_text = str(out)
+                        if "BUY" in sig_text.upper() or "STRONG BUY" in sig_text.upper():
+                            sig = "LONG"
+                        elif "SELL" in sig_text.upper():
+                            sig = "SHORT"
+                        else:
+                            sig = "HOLD"
+
+                        # basic SL/TP using ATR-like estimation
+                        try:
+                            highs = df["high"].astype(float)
+                            lows = df["low"].astype(float)
+                            closes = df["close"].astype(float)
+                            atr_val = (highs - lows).rolling(14).mean().iloc[-1]
+                            last = float(closes.iloc[-1])
+                            if sig == "LONG":
+                                sl = last - (atr_val * 1.5)
+                                tp1 = last + (atr_val * 1.5)
+                            elif sig == "SHORT":
+                                sl = last + (atr_val * 1.5)
+                                tp1 = last - (atr_val * 1.5)
+                            else:
+                                sl = last * 0.995
+                                tp1 = last * 1.005
+                        except Exception:
+                            sl = None
+                            tp1 = None
+
+                        return {
+                            "symbol": symbol.upper(),
+                            "interval": interval,
+                            "signal": sig,
+                            "entry": float(closes.iloc[-1]),
+                            "sl": float(sl) if sl else None,
+                            "tp1": float(tp1) if tp1 else None,
+                            "confidence": 0.3,
+                            "reasons": [sig_text],
+                        }
+                    except Exception:
+                        logger.exception("legacy_generate_signal failed on df")
+                        continue
+            except Exception:
+                logger.exception("fetch_klines_multi attempt failed")
+                continue
+        return {"error": "no_data_on_exchanges"}
+    else:
+        return {"error": "no_fetch_klines_available"}
+except Exception as exc:
+    logger.exception("_safe_generate_signal unexpected error")
+    return {"error": str(exc)}
+
+----- recording & messaging -----
+
+def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False): """Record a signal in storage and send it (image + caption).""" # storage read try: d = load_data() if load_data else {} except Exception: d = {}
+
+sig_id = f"S{int(time.time())}"
+balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
+
+# risk and pos
+risk_amt, pos_size = compute_risk_and_size(sig.get("entry") or 0.0, sig.get("sl") or 0.0, balance, RISK_PERCENT)
+
+rec = {
+    "id": sig_id,
+    "signal": sig,
+    "time": datetime.utcnow().isoformat(),
+    "risk_amt": risk_amt,
+    "pos_size": pos_size,
+    "user": user_id or ADMIN_ID,
+    "auto": bool(auto),
+}
+
+# save record
+try:
+    if isinstance(d, dict):
+        d.setdefault("signals", []).append(rec)
+        d.setdefault("stats", {})
+        d["stats"]["total_signals"] = d["stats"].get("total_signals", 0) + 1
+        if save_data:
+            save_data(d)
+except Exception:
+    logger.exception("Failed to save signal record")
+
+# Build caption
+try:
+    confidence_pct = int(sig.get("confidence", 0) * 100)
+except Exception:
+    confidence_pct = 0
+
+caption = (
+    f"� <b>Destiny Trading Empire — Signal</b>
+
+" f"ID: {sig_id} Pair: {sig.get('symbol')} | TF: {sig.get('interval')} " f"Signal: <b>{sig.get('signal')}</b> Entry: {sig.get('entry') or 'N/A'} | SL: {sig.get('sl') or 'N/A'} | TP1: {sig.get('tp1') or 'N/A'} " f"Confidence: {confidence_pct}% | Risk (USD): {risk_amt} " f"Reasons: {', '.join(sig.get('reasons', []) or ['None'])} " ) caption = _append_brand(caption)
+
+# Image creation
+img = None
+try:
+    if generate_branded_signal_image and isinstance(sig, dict):
+        try:
+            img_buf, _ = generate_branded_signal_image(
+                {
+                    "symbol": sig.get("symbol"),
+                    "analysis": None,
+                    "combined_score": sig.get("confidence", 0),
+                    "combined_signal": sig.get("signal"),
+                    "sl": sig.get("sl"),
+                    "tp1": sig.get("tp1"),
+                    "image": None,
+                    "caption_lines": [f"{sig.get('symbol')} | {sig.get('interval')} | {sig.get('signal')}"],
+                }
+            )
+            if img_buf:
+                img = img_buf
+        except Exception:
+            logger.exception("generate_branded_signal_image failed")
+
+    if not img and build_signal_image:
+        try:
+            img = build_signal_image(sig)
+        except Exception:
+            logger.exception("build_signal_image failed")
+except Exception:
+    logger.exception("build_signal_image wrapper failed")
+
+# Keyboard for message
+kb = types.InlineKeyboardMarkup(row_width=2)
+kb.add(types.InlineKeyboardButton("📷 Link PnL", callback_data=f"link_{sig_id}"))
+kb.add(types.InlineKeyboardButton("🤖 AI Details", callback_data=f"ai_{sig_id}"))
+kb.add(types.InlineKeyboardButton("🔁 Share", switch_inline_query=f"{sig.get('symbol')}"))
+
+# send (use safe_send_with_image if available)
+try:
+    if safe_send_with_image:
+        safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
+    else:
+        if img:
+            try:
+                img.seek(0)
+            except Exception:
+                pass
+            bot.send_photo(chat_id or ADMIN_ID, img, caption=caption, reply_markup=kb)
+        else:
+            bot.send_message(chat_id or ADMIN_ID, caption, reply_markup=kb)
+except Exception:
+    logger.exception("Failed to send signal message")
+
+# optionally send a quick AI rationale follow-up if available
+try:
+    if ai_analysis_text and sig and not sig.get("error"):
+        prompt = f"Provide concise trade rationale for this signal:
+
+{json.dumps(sig, default=str)}" ai_text = ai_analysis_text(prompt) if ai_text: follow = _append_brand(f"🤖 AI Rationale: {ai_text}") bot.send_message(chat_id or ADMIN_ID, follow) except Exception: logger.exception("AI rationale follow-up failed")
+
+return sig_id
+
+----- keyboard UI -----
+
+def main_keyboard(): kb = types.InlineKeyboardMarkup(row_width=2) kb.add( types.InlineKeyboardButton("📈 Get Signals", callback_data="get_signal"), types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4"), ) kb.add( types.InlineKeyboardButton("⚙️ Bot Status", callback_data="bot_status"), types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending"), ) kb.add( types.InlineKeyboardButton("📰 Market News", callback_data="market_news"), types.InlineKeyboardButton("📃 My Challenge", callback_data="challenge_status"), ) kb.add( types.InlineKeyboardButton("📷 Upload PnL", callback_data="pnl_upload"), types.InlineKeyboardButton("📋 History", callback_data="history"), ) kb.add( types.InlineKeyboardButton("🤖 AI Market Brief", callback_data="ask_ai"), types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot"), ) kb.add( types.InlineKeyboardButton("▶ Start Auto Scanner", callback_data="start_auto_brief"), types.InlineKeyboardButton("⏹ Stop Auto Scanner", callback_data="stop_auto_brief"), ) kb.add( types.InlineKeyboardButton("📣 Start Auto Briefs", callback_data="start_auto_brief_scheduler"), types.InlineKeyboardButton("⛔ Stop Auto Briefs", callback_data="stop_auto_brief_scheduler"), ) return kb
+
+--- Telegram handlers ---
+
 @bot.message_handler(commands=["start", "menu"])
 def cmd_start(msg):
     try:
         # always reply with main keyboard and branding image if available
-        text = "\U0001F44B Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."
+        text = "👋 Welcome Boss Destiny!
+
+This is your Trading Empire control panel."
         lines = [
-            "Welcome — Destiny Trading Empire Bot \U0001f48e",
+            "Welcome — Destiny Trading Empire Bot 💎",
             "Use the buttons to get signals, start scanners, view trending pairs.",
         ]
         if create_brand_image:
             try:
-                img = create_brand_image(lines, title="Destiny Trading Empire Bot \U0001f48e")
+                img = create_brand_image(lines, title="Destiny Trading Empire Bot 💎")
                 if safe_send_with_image:
                     safe_send_with_image(bot, msg.chat.id, _append_brand(text), img, reply_markup=main_keyboard())
                     return
@@ -686,7 +448,8 @@ def callback_handler(call):
             if sig.get("error"):
                 # if no data try again with a different exchange/timeframe message
                 err = sig.get("error")
-                bot.send_message(cid, _append_brand(f"Error generating signal: {err}\nTry another timeframe or check pair symbol."))
+                bot.send_message(cid, _append_brand(f"Error generating signal: {err}
+Try another timeframe or check pair symbol."))
                 return
             # Standardize missing fields
             sig.setdefault("interval", SIGNAL_INTERVAL_DEFAULT)
@@ -696,7 +459,7 @@ def callback_handler(call):
 
         # quick scan top X
         if data == "scan_top4":
-            bot.send_message(cid, _append_brand("\U0001F50E Scanning top pairs across exchanges..."))
+            bot.send_message(cid, _append_brand("🔎 Scanning top pairs across exchanges..."))
             for p in PAIRS[:6]:
                 try:
                     if can_send_signal(p, SIGNAL_INTERVAL_DEFAULT):
@@ -708,7 +471,7 @@ def callback_handler(call):
             return
 
         if data == "trending":
-            bot.send_message(cid, _append_brand("\U0001F4E1 Fetching multi-exchange trending pairs... please wait."))
+            bot.send_message(cid, _append_brand("📡 Fetching multi-exchange trending pairs... please wait."))
             try:
                 # support multi-exchange aggregation if detect_strong_signals available
                 if fetch_trending_pairs_branded:
@@ -736,47 +499,50 @@ def callback_handler(call):
         if data == "bot_status":
             # provide brief health info and whether scanner is running
             scanner_running = _scanner_thread is not None and _scanner_thread.is_alive()
-            msg = f"\u2699\ufe0f Bot is running \u2705\nScanner running: {scanner_running}\nAuto confidence threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%"
+            msg = f"⚙️ Bot is running ✅
+Scanner running: {scanner_running}
+Auto confidence threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%"
             bot.send_message(cid, _append_brand(msg))
             return
 
         if data == "market_news":
-            bot.send_message(cid, _append_brand("\U0001F4F0 Market news: feature coming soon"))
+            bot.send_message(cid, _append_brand("📰 Market news: feature coming soon"))
             return
 
         if data == "challenge_status":
             d = load_data() if load_data else {}
-            bal = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
-            wins = d.get("challenge", {}).get("wins", 0) if isinstance(d, dict) else 0
-            losses = d.get("challenge", {}).get("losses", 0) if isinstance(d, dict) else 0
-            bot.send_message(cid, _append_brand(f"Balance: ${bal:.2f}\nWins: {wins} Losses: {losses}"))
+            bal = d.get("challenge",{}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
+            wins = d.get("challenge",{}).get("wins",0) if isinstance(d, dict) else 0
+            losses = d.get("challenge",{}).get("losses",0) if isinstance(d, dict) else 0
+            bot.send_message(cid, _append_brand(f"Balance: ${bal:.2f}
+Wins: {wins} Losses: {losses}"))
             return
 
         if data == "ask_ai":
-            bot.send_message(cid, _append_brand("\U0001F916 Ask AI: send a message starting with `AI:` followed by your question."))
+            bot.send_message(cid, _append_brand("🤖 Ask AI: send a message starting with `AI:` followed by your question."))
             return
 
         if data == "refresh_bot":
-            bot.send_message(cid, _append_brand("\U0001F504 Refreshing bot session..."))
+            bot.send_message(cid, _append_brand("🔄 Refreshing bot session..."))
             stop_existing_bot_instances()
             time.sleep(2)
-            bot.send_message(cid, _append_brand("\u2705 Refreshed."))
+            bot.send_message(cid, _append_brand("✅ Refreshed."))
             return
 
         if data == "start_auto_brief":
-            bot.send_message(cid, _append_brand("\u25B6 Starting background market scanner (auto-send strong signals)."))
+            bot.send_message(cid, _append_brand("▶ Starting background market scanner (auto-send strong signals)."))
             start_background_scanner()
             return
 
         if data == "stop_auto_brief":
-            bot.send_message(cid, _append_brand("\u23F9 Stopping background market scanner."))
+            bot.send_message(cid, _append_brand("⏹ Stopping background market scanner."))
             stop_background_scanner()
             return
 
         # Scheduler-based auto briefs (text/AI summaries)
         if data == "start_auto_brief_scheduler":
             if start_scheduler:
-                bot.send_message(cid, _append_brand("\u25B6 Scheduler for auto-briefs enabled. You will receive periodic market briefs."))
+                bot.send_message(cid, _append_brand("▶ Scheduler for auto-briefs enabled. You will receive periodic market briefs."))
                 try:
                     start_scheduler(bot)
                 except Exception:
@@ -788,7 +554,7 @@ def callback_handler(call):
         if data == "stop_auto_brief_scheduler":
             if stop_scheduler:
                 stop_scheduler()
-                bot.send_message(cid, _append_brand("\u23F9 Scheduler for auto-briefs disabled."))
+                bot.send_message(cid, _append_brand("⏹ Scheduler for auto-briefs disabled."))
             else:
                 bot.send_message(cid, _append_brand("Scheduler not available (missing scheduler module)."))
             return
@@ -800,9 +566,11 @@ def callback_handler(call):
             if not rec:
                 bot.send_message(cid, _append_brand("Signal not found"))
                 return
-            prompt = f"Provide trade rationale, risk controls and a recommended leverage for this trade:\n{rec['signal']}"
+            prompt = f"Provide trade rationale, risk controls and a recommended leverage for this trade:
+{rec['signal']}"
             ai_text = ai_analysis_text(prompt) if ai_analysis_text else "AI feature not available"
-            bot.send_message(cid, _append_brand(f"\U0001F916 AI analysis:\n{ai_text}"))
+            bot.send_message(cid, _append_brand(f"🤖 AI analysis:
+{ai_text}"))
             return
 
         bot.send_message(cid, _append_brand("Unknown action"))
@@ -864,7 +632,8 @@ def _scanner_loop():
                                 mark_signal_sent(pair, interval)
                                 target = ADMIN_ID if AUTO_SEND_ONLY_ADMIN and ADMIN_ID else None
                                 img = cand.get("image")
-                                cap = "\n".join(cand.get("caption_lines", [])) if cand.get("caption_lines") else f"Auto strong signal {pair}"
+                                cap = "
+".join(cand.get("caption_lines", [])) if cand.get("caption_lines") else f"Auto strong signal {pair}"
                                 cap = _append_brand(cap)
                                 if img and safe_send_with_image:
                                     safe_send_with_image(bot, target or ADMIN_ID, cap, img)
@@ -878,7 +647,7 @@ def _scanner_loop():
                                         "sl": cand.get("sl"),
                                         "tp1": cand.get("tp1"),
                                         "confidence": cand.get("combined_score", 0.0),
-                                        "reasons": [],
+                                        "reasons": []
                                     }
                                     record_signal_and_send(sig, chat_id=target, user_id=ADMIN_ID, auto=True)
                                 logger.info("[SCANNER] Auto-sent %s conf=%.3f", pair, conf)
@@ -889,7 +658,7 @@ def _scanner_loop():
                 except Exception:
                     logger.exception("detect_strong_signals detectors failed; fallback scanning below")
 
-                      # fallback scanning: loop each pair/timeframe via _safe_generate_signal
+            # fallback scanning: loop each pair/timeframe via _safe_generate_signal
             for interval in SCAN_INTERVALS:
                 if _scanner_stop_event.is_set():
                     break
@@ -918,6 +687,7 @@ def _scanner_loop():
             logger.exception("Unhandled error in scanner loop")
             time.sleep(1.0)
     logger.info("[SCANNER] Background scanner stopped.")
+
 
 
 def start_background_scanner():
@@ -949,12 +719,18 @@ def _signal_build_caption(signal_dict: dict) -> str:
         reasons_text = ", ".join(reasons) if isinstance(reasons, (list, tuple)) else str(reasons)
         conf_pct = float(signal_dict.get("confidence", 0.0)) * 100.0
         caption = (
-            f"<b>{signal_dict.get('symbol')} | {signal_dict.get('interval')}</b>\n"
-            f"Signal: <b>{signal_dict.get('signal')}</b>\n"
-            f"Entry: {signal_dict.get('entry')}  SL: {signal_dict.get('sl')}  TP1: {signal_dict.get('tp1')}\n"
-            f"Confidence: {conf_pct:.1f}%\n"
-            f"Source: {signal_dict.get('source_exchange')}\n"
-            f"Reasons: {reasons_text}\n"
+            f"<b>{signal_dict.get('symbol')} | {signal_dict.get('interval')}</b>
+"
+            f"Signal: <b>{signal_dict.get('signal')}</b>
+"
+            f"Entry: {signal_dict.get('entry')}  SL: {signal_dict.get('sl')}  TP1: {signal_dict.get('tp1')}
+"
+            f"Confidence: {conf_pct:.1f}%
+"
+            f"Source: {signal_dict.get('source_exchange')}
+"
+            f"Reasons: {reasons_text}
+"
             f"<i>{signal_dict.get('timestamp')}</i>"
         )
         return caption
@@ -971,13 +747,14 @@ def _signal_send_callback(signal_dict: dict):
         caption = _signal_build_caption(signal_dict)
         # try to send branded image if present
         try:
-            lines = signal_dict.get("caption_lines") or caption.split("\n")[:12]
+            lines = signal_dict.get("caption_lines") or caption.split("
+")[:12]
             chart = None
             ci = signal_dict.get("chart_img")
             if isinstance(ci, (bytes, bytearray)):
                 chart = ci
             elif signal_dict.get("chart_bytes"):
-                chart = signal_dict.get("chart_bytes")
+             chart = signal_dict.get("chart_bytes")
             if create_brand_image:
                 try:
                     img_buf = create_brand_image(lines, chart_img_bytes=chart)
@@ -1052,4 +829,4 @@ def start_bot_polling():
 
 if __name__ == "__main__":
     logger.info("bot_runner loaded as main; not starting polling automatically.")
-  
+    
