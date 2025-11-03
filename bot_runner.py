@@ -10,7 +10,7 @@ from datetime import datetime
 import telebot
 from telebot import types
 
------ Branding and global constants -----
+# ----- Branding and global constants -----
 
 BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot \U0001f48e</b>"
 
