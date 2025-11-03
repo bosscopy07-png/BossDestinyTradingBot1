@@ -42,10 +42,11 @@ except Exception:
     fetch_trending_pairs_text = None
 
 try:
-    from image_utils import build_signal_image, safe_send_with_image
+    from image_utils import build_signal_image, safe_send_with_image, create_brand_image
 except Exception:
     build_signal_image = None
     safe_send_with_image = None
+    create_brand_image = None
 
 try:
     from signal_engine import generate_signal
@@ -66,11 +67,20 @@ except Exception:
     ai_analysis_text = None
 
 try:
-    from pro_features import top_gainers_pairs, fear_and_greed_index, futures_leverage_suggestion
+    from pro_features import top_gainers_pairs, fear_and_greed_index, futures_leverage_suggestion, quickchart_price_image, ai_market_brief_text
 except Exception:
     top_gainers_pairs = None
     fear_and_greed_index = None
     futures_leverage_suggestion = None
+    quickchart_price_image = None
+    ai_market_brief_text = None
+
+# Scheduler (for auto-briefs)
+try:
+    from scheduler import start_scheduler, stop_scheduler
+except Exception:
+    start_scheduler = None
+    stop_scheduler = None
 
 # ensure storage directory/data if module available
 if ensure_storage:
@@ -211,6 +221,18 @@ def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
     except Exception:
         logging.exception("Failed to send signal message")
 
+    # optionally send a quick AI rationale follow-up if available
+    try:
+        if ai_analysis_text and sig and not sig.get("error"):
+            prompt = f"Provide concise trade rationale for this signal:\n{sig}"
+            ai_text = ai_analysis_text(prompt)
+            if ai_text:
+                follow = _append_brand(f"🤖 AI Rationale:\n{ai_text}")
+                # send as message (no image)
+                bot.send_message(chat_id or ADMIN_ID, follow)
+    except Exception:
+        logging.exception("AI rationale follow-up failed")
+
     return sig_id
 
 # ----- keyboard UI -----
@@ -240,17 +262,23 @@ def main_keyboard():
         types.InlineKeyboardButton("▶️ Start Auto Scanner", callback_data="start_auto_brief"),
         types.InlineKeyboardButton("⏹ Stop Auto Scanner", callback_data="stop_auto_brief")
     )
+    kb.add(
+        types.InlineKeyboardButton("📣 Start Auto Briefs", callback_data="start_auto_brief_scheduler"),
+        types.InlineKeyboardButton("⛔ Stop Auto Briefs", callback_data="stop_auto_brief_scheduler")
+    )
     return kb
 
 # ----- Telegram handlers -----
 @bot.message_handler(commands=['start', 'menu'])
 def cmd_start(msg):
     try:
-        bot.send_message(
-            msg.chat.id,
-            _append_brand("👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."),
-            reply_markup=main_keyboard()
-        )
+        # always reply with main keyboard and branding image if available
+        text = _append_brand("👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel.")
+        if create_brand_image:
+            img = create_brand_image(["Welcome — Destiny Trading Empire Bot 💎"])
+            safe_send_with_image(bot, msg.chat.id, text, img, reply_markup=main_keyboard())
+        else:
+            bot.send_message(msg.chat.id, text, reply_markup=main_keyboard())
     except Exception:
         logging.exception("cmd_start failed")
 
@@ -344,7 +372,7 @@ def callback_handler(call):
             bot.send_message(cid, _append_brand("📡 Fetching multi-exchange trending pairs... please wait."))
             try:
                 if fetch_trending_pairs_branded:
-                    img_buf, caption = fetch_trending_pairs_branded(top_n=8)
+                    img_buf, caption = fetch_trending_pairs_branded(limit=8)
                     if img_buf:
                         safe_send_with_image(bot, cid, _append_brand(caption), img_buf)
                     else:
@@ -359,7 +387,10 @@ def callback_handler(call):
             return
 
         if data == "bot_status":
-            bot.send_message(cid, _append_brand("⚙️ Bot is running ✅"))
+            # provide brief health info and whether scanner is running
+            scanner_running = _scanner_thread is not None and _scanner_thread.is_alive()
+            msg = f"⚙️ Bot is running ✅\nScanner running: {scanner_running}\nAuto confidence threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%"
+            bot.send_message(cid, _append_brand(msg))
             return
 
         if data == "market_news":
@@ -395,6 +426,26 @@ def callback_handler(call):
             stop_background_scanner()
             return
 
+        # Scheduler-based auto briefs (text/AI summaries)
+        if data == "start_auto_brief_scheduler":
+            if start_scheduler:
+                bot.send_message(cid, _append_brand("▶️ Scheduler for auto-briefs enabled. You will receive periodic market briefs."))
+                try:
+                    start_scheduler(bot)
+                except Exception:
+                    logging.exception("start_scheduler failed")
+            else:
+                bot.send_message(cid, _append_brand("Scheduler not available (missing scheduler module)."))
+            return
+
+        if data == "stop_auto_brief_scheduler":
+            if stop_scheduler:
+                stop_scheduler()
+                bot.send_message(cid, _append_brand("⏹ Scheduler for auto-briefs disabled."))
+            else:
+                bot.send_message(cid, _append_brand("Scheduler not available (missing scheduler module)."))
+            return
+
         if data.startswith("ai_"):
             sig_id = data.split("_",1)[1]
             d = load_data() if load_data else {}
@@ -414,7 +465,7 @@ def callback_handler(call):
             bot.answer_callback_query(call.id, "Handler error")
         except Exception:
             pass
-
+            
 # ----- Background scanner (auto-detect strong signals) -----
 def _scanner_loop():
     """
@@ -468,6 +519,11 @@ def start_background_scanner():
     _scanner_thread = threading.Thread(target=_scanner_loop, daemon=True)
     _scanner_thread.start()
     logging.info("[SCANNER] Started background scanner thread.")
+    # notify admin
+    try:
+        bot.send_message(ADMIN_ID, _append_brand("▶️ Background market scanner started. Auto-sends will be delivered to admin."))
+    except Exception:
+        logging.exception("notify admin start scanner failed")
 
 def stop_background_scanner():
     global _scanner_thread, _scanner_stop_event
@@ -478,11 +534,34 @@ def stop_background_scanner():
     _scanner_thread.join(timeout=5)
     _scanner_thread = None
     logging.info("[SCANNER] Stop requested and thread joined.")
+    # notify admin
+    try:
+        bot.send_message(ADMIN_ID, _append_brand("⏹ Background market scanner stopped."))
+    except Exception:
+        logging.exception("notify admin stop scanner failed")
 
 # ----- Start polling safely (exported) -----
 def start_bot_polling():
     stop_existing_bot_instances()
     logging.info("[BOT] Starting polling loop...")
+
+    # initial startup notification for admin (if available)
+    try:
+        status_lines = [
+            "🚀 Destiny Trading Empire Bot online",
+            f"Auto-scan TFs: {', '.join(SCAN_INTERVALS)}",
+            f"Pairs tracked: {', '.join(PAIRS[:10])} {'...' if len(PAIRS)>10 else ''}",
+            f"Auto-send threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%",
+        ]
+        if create_brand_image:
+            img = create_brand_image(["Destiny Trading Empire Bot 💎 — Online"])
+            safe_send_with_image(bot, ADMIN_ID, _append_brand("\n".join(status_lines)), img)
+        else:
+            bot.send_message(ADMIN_ID, _append_brand("\n".join(status_lines)))
+    except Exception:
+        logging.exception("startup notify failed")
+
+    # start polling (blocking)
     while True:
         try:
             bot.infinity_polling(timeout=60, long_polling_timeout=60, skip_pending=True)
