@@ -2,7 +2,11 @@
 import os
 import time
 import logging
+import traceback
 
+# -----------------------------
+# LOGGING SETUP
+# -----------------------------
 logger = logging.getLogger("AI_Client")
 logger.setLevel(logging.INFO)
 if not logger.handlers:
@@ -10,51 +14,80 @@ if not logger.handlers:
     ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(ch)
 
+# -----------------------------
+# OPENAI CLIENT INITIALIZATION
+# -----------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
 client = None
 try:
     if OPENAI_API_KEY:
-        # prefer new OpenAI python library if available
         try:
             from openai import OpenAI
             client = OpenAI(api_key=OPENAI_API_KEY)
+            logger.info("[AI] Using modern OpenAI client ✅")
         except Exception:
             import openai
             openai.api_key = OPENAI_API_KEY
             client = openai
-except Exception:
+            logger.info("[AI] Using legacy OpenAI client ✅")
+    else:
+        logger.warning("[AI] No API key found — AI features disabled ❌")
+except Exception as e:
+    logger.error(f"[AI] Initialization failed: {e}")
     client = None
 
-def ai_analysis_text(prompt, retries=2):
+# -----------------------------
+# CORE FUNCTION
+# -----------------------------
+def ai_analysis_text(prompt, retries=3, temperature=0.6, max_tokens=400):
+    """
+    Generate AI-based text responses.
+    Used for market briefs, analysis summaries, and smart insights.
+    """
     if not client:
-        return "⚠️ AI not configured. Set OPENAI_API_KEY to enable AI features."
-    for attempt in range(1, retries+1):
+        return "⚠️ AI not configured. Please set OPENAI_API_KEY."
+
+    for attempt in range(1, retries + 1):
         try:
-            # try modern interface first
+            logger.info(f"[AI] Processing request (attempt {attempt})...")
+            # --- Modern interface (preferred) ---
             if hasattr(client, "chat") and hasattr(client.chat, "completions"):
                 resp = client.chat.completions.create(
-                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                    messages=[{"role":"system","content":"You are a crypto trading assistant."},
-                              {"role":"user","content":prompt}],
-                    temperature=0.6,
-                    max_tokens=350
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a professional crypto trading AI analyst."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens
                 )
                 text = resp.choices[0].message.content.strip()
+                logger.info("[AI] Response generated successfully ✅")
                 return text
+
+            # --- Legacy ChatCompletion ---
+            elif hasattr(client, "ChatCompletion"):
+                resp = client.ChatCompletion.create(
+                    model=OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": "You are a professional crypto trading AI analyst."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+                text = resp.choices[0].message.content.strip()
+                logger.info("[AI] Response generated via legacy interface ✅")
+                return text
+
             else:
-                # fallback to openai.Completion or ChatCompletion
-                if hasattr(client, "ChatCompletion"):
-                    resp = client.ChatCompletion.create(
-                        model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-                        messages=[{"role":"system","content":"You are a crypto trading assistant."},
-                                  {"role":"user","content":prompt}],
-                        temperature=0.6,
-                        max_tokens=350
-                    )
-                    return resp.choices[0].message.content.strip()
-                else:
-                    return "AI client available but interface unsupported."
+                return "⚠️ AI interface unsupported by current library version."
+
         except Exception as e:
-            logger.error("AI attempt %s failed: %s", attempt, e)
-            time.sleep(1)
-    return "⚠️ AI service currently unavailable."
+            logger.error(f"[AI] Attempt {attempt} failed: {e}")
+            traceback.print_exc()
+            time.sleep(2)
+
+    return "⚠️ AI service currently unavailable. Try again later."
