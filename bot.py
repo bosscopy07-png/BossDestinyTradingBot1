@@ -1,4 +1,3 @@
-# bot.py
 import os, threading, logging, time
 from flask import Flask, jsonify
 import bot_runner
@@ -8,7 +7,11 @@ app = Flask("destiny_health")
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"service":"destiny_trading_empire_bot","status":"running","time":time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())})
+    return jsonify({
+        "service": "destiny_trading_empire_bot",
+        "status": "running",
+        "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    })
 
 def run_bot():
     while True:
@@ -20,6 +23,10 @@ def run_bot():
             time.sleep(3)
 
 if __name__ == "__main__":
-    t = threading.Thread(target=run_bot, daemon=True); t.start()
+    # run bot in a background thread
+    t = threading.Thread(target=run_bot, daemon=True)
+    t.start()
+
+    # start Flask web server for deployment health check
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port, use_reloader=False)
