@@ -1,15 +1,23 @@
-# bot_runner.py (edited & extended with fallbacks)
+# bot_runner.py (complete updated)
 import os
 import time
 import threading
 import traceback
 import requests
 import logging
-import json as _json
 from datetime import datetime
 import telebot
 from telebot import types
+import json
 import re
+from io import BytesIO
+
+# Attempt to import Pillow for image creation (text -> image)
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    HAS_PIL = True
+except Exception:
+    HAS_PIL = False
 
 # ----- Branding and global constants -----
 BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot 💎</b>"
@@ -163,131 +171,146 @@ except Exception:
     stop_scheduler = None
     logger.exception("scheduler import failed")
 
-# ------------------------------
-# Local fallback storage (when storage.py missing)
-# ------------------------------
-DATA_PATH = os.getenv("BOT_DATA_PATH", "./bot_data.json")
-PNL_DIR = os.getenv("BOT_PNL_DIR", "./pnl_screenshots")
-
-
-def _ensure_local_storage():
+# ensure storage directory/data if module available
+if ensure_storage:
     try:
-        os.makedirs(os.path.dirname(DATA_PATH) or ".", exist_ok=True)
-        os.makedirs(PNL_DIR, exist_ok=True)
-        if not os.path.exists(DATA_PATH):
-            with open(DATA_PATH, "w") as fh:
-                fh.write(_json.dumps({"signals": [], "pnl": [], "challenge": {"balance": CHALLENGE_START}}))
-        return True
+        ensure_storage()
     except Exception:
-        logger.exception("Local storage ensure failed")
-        return False
-
-
-def _load_local_data():
-    try:
-        if not os.path.exists(DATA_PATH):
-            _ensure_local_storage()
-        with open(DATA_PATH, "r") as fh:
-            return _json.load(fh)
-    except Exception:
-        logger.exception("load_data fallback failed")
-        return {"signals": [], "pnl": [], "challenge": {"balance": CHALLENGE_START}}
-
-
-def _save_local_data(d):
-    try:
-        with open(DATA_PATH, "w") as fh:
-            fh.write(_json.dumps(d, indent=2, default=str))
-        return True
-    except Exception:
-        logger.exception("save_data fallback failed")
-        return False
-
-
-def _record_pnl_local(data_bytes, filename_prefix, user_id, caption=None):
-    try:
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        fname = f"{filename_prefix}_{user_id}_{ts}.jpg"
-        path = os.path.join(PNL_DIR, fname)
-        with open(path, "wb") as fh:
-            fh.write(data_bytes)
-        # update bot data
-        d = load_data() if load_data else _load_local_data()
-        entry = {"from": user_id, "file": path, "caption": caption, "time": datetime.utcnow().isoformat(), "linked": None}
-        d.setdefault("pnl", []).append(entry)
-        if save_data:
-            try:
-                save_data(d)
-            except Exception:
-                _save_local_data(d)
-        else:
-            _save_local_data(d)
-        return path
-    except Exception:
-        logger.exception("record_pnl_local failed")
-        return None
-
-
-# Wire fallback functions if storage module missing
-if ensure_storage is None or load_data is None or save_data is None or record_pnl_screenshot is None:
-    try:
-        # Replace only if missing so original storage module (if present) still used
-        if ensure_storage is None:
-            ensure_storage = _ensure_local_storage
-        if load_data is None:
-            load_data = _load_local_data
-        if save_data is None:
-            save_data = _save_local_data
-        if record_pnl_screenshot is None:
-            record_pnl_screenshot = _record_pnl_local
-        # ensure dirs exist
-        _ensure_local_storage()
-    except Exception:
-        logger.exception("Failed to wire local storage fallbacks")
+        logger.exception("ensure_storage failed")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 _last_signal_time = {}  # dict mapping (symbol|interval) -> datetime of last auto-send
 _scanner_thread = None
 _scanner_stop_event = threading.Event()
 
-# ----- helpers -----
+
+# ---------------------------
+# Helper: build brand image (fallback)
+# ---------------------------
+def _local_create_brand_image(lines, title=None, chart_bytes: bytes = None, width=900, height=360):
+    """
+    Create a simple branded image using Pillow from the given lines (list of str).
+    Returns BytesIO of PNG. If Pillow missing, return None.
+    """
+    if not HAS_PIL:
+        return None
+    try:
+        # Basic layout: chart area left (if chart_bytes), text area right
+        img = Image.new("RGB", (width, height), color=(12, 18, 28))
+        draw = ImageDraw.Draw(img)
+
+        # fonts (use default if not available)
+        try:
+            font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            title_font = ImageFont.truetype(font_path, 22)
+            text_font = ImageFont.truetype(font_path, 16)
+            small_font = ImageFont.truetype(font_path, 12)
+        except Exception:
+            title_font = ImageFont.load_default()
+            text_font = ImageFont.load_default()
+            small_font = ImageFont.load_default()
+
+        padding = 12
+        x = padding
+        y = padding
+
+        # draw title
+        t = title or "Destiny Trading Empire"
+        draw.text((x, y), t, font=title_font, fill=(255, 215, 0))
+        y += 32
+
+        # draw lines (cap to some lines that fit)
+        for li in lines[:8]:
+            draw.text((x, y), li, font=text_font, fill=(230, 230, 230))
+            y += 20
+
+        # add brand label bottom-right
+        brand_text = "Destiny Trading Empire Bot 💎"
+        tw, th = draw.textsize(brand_text, font=small_font)
+        draw.text((width - tw - padding, height - th - padding), brand_text, font=small_font, fill=(160, 160, 160))
+
+        # If chart provided, paste it on left (resize as needed)
+        if chart_bytes:
+            try:
+                ch = Image.open(BytesIO(chart_bytes)).convert("RGB")
+                ch_w = int(width * 0.42)
+                ch_h = height - 2 * padding
+                ch = ch.resize((ch_w, ch_h))
+                img.paste(ch, (width - ch_w - padding, padding))
+            except Exception:
+                pass
+
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+    except Exception:
+        logger.exception("Local brand image creation failed")
+        return None
+
+
+# expose create_brand_image either from image_utils or local fallback
+if create_brand_image is None:
+    create_brand_image = _local_create_brand_image
+
+# safe_send_with_image wrapper (if not present)
+def _safe_send_with_image(bot_inst, chat_id, caption, img_buf, reply_markup=None):
+    try:
+        if hasattr(img_buf, "seek"):
+            img_buf.seek(0)
+        bot_inst.send_photo(chat_id, img_buf, caption=caption, reply_markup=reply_markup)
+    except Exception:
+        try:
+            # sometimes Telegram expects file-like with filename
+            bot_inst.send_photo(chat_id, img_buf, caption=caption, reply_markup=reply_markup)
+        except Exception:
+            logger.exception("safe_send_with_image failed, falling back to text")
+            try:
+                bot_inst.send_message(chat_id, caption, reply_markup=reply_markup)
+            except Exception:
+                pass
+
+
+if safe_send_with_image is None:
+    safe_send_with_image = _safe_send_with_image
+
+
+# ---------------------------
+# Utilities
+# ---------------------------
 def _append_brand(text: str) -> str:
     if BRAND_TAG.strip() not in text:
         return text + BRAND_TAG
     return text
 
 
-def _send_branded(chat_id, text, lines_for_image=None, reply_markup=None):
+def _send_branded(chat_id, text, lines_for_image=None, chart_bytes: bytes = None, reply_markup=None):
     """
-    Always attempt to send a small branded image + caption. If image can't be created, send text only (with brand).
+    Build a branded image (text -> image) and send it. If image creation fails we fallback to text.
+    lines_for_image: list of lines used to render image
     """
     try:
-        caption = _append_brand(text)
+        caption = _append_brand("")  # caption left empty because we render text inside image per your requirement
+        # Build image content lines (ensure not empty)
+        lines = lines_for_image or (text.splitlines() if isinstance(text, str) else [])
+        title = "Destiny Trading Empire Bot 💎"
+        img_buf = None
 
-        # If create_brand_image available and we have lines, build an image
-        if create_brand_image and isinstance(lines_for_image, (list, tuple)) and lines_for_image:
-            try:
-                img = create_brand_image(lines_for_image, title="Destiny Trading Empire Bot 💎")
-                if safe_send_with_image:
-                    safe_send_with_image(bot, chat_id, caption, img, reply_markup=reply_markup)
-                    return
-                else:
-                    try:
-                        img.seek(0)
-                    except Exception:
-                        pass
-                    bot.send_photo(chat_id, img, caption=caption, reply_markup=reply_markup)
-                    return
-            except Exception:
-                logger.exception("create_brand_image failed; falling back to text")
+        # prefer your project's create_brand_image if it exists (it might return BytesIO / bytes)
+        try:
+            tmp = create_brand_image(lines, title=title, chart_img=chart_bytes)
+            if tmp:
+                img_buf = tmp
+        except Exception:
+            # try local builder
+            img_buf = _local_create_brand_image(lines, title=title, chart_bytes=chart_bytes)
 
-        # fallback: if there is an image buffer passed directly via safe_send_with_image
-        if safe_send_with_image and isinstance(lines_for_image, (bytes, bytearray)):
-            safe_send_with_image(bot, chat_id, caption, lines_for_image, reply_markup=reply_markup)
+        if img_buf:
+            safe_send_with_image(bot, chat_id, caption or _append_brand(""), img_buf, reply_markup=reply_markup)
             return
 
-        # final fallback: send text message
-        bot.send_message(chat_id, caption, reply_markup=reply_markup)
+        # final fallback: send plain text message (rare; you requested images, so prefer image)
+        bot.send_message(chat_id, _append_brand(text), reply_markup=reply_markup)
     except Exception:
         logger.exception("Failed to _send_branded")
         try:
@@ -333,10 +356,398 @@ def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent:
     return round(risk_amount, 8), round(pos_size, 8)
 
 
-# ----- small background scanner wrappers -----
+# ---------------------------
+# Market data helpers (public fallback)
+# ---------------------------
+def _binance_klines(symbol: str, interval: str = "1h", limit: int = 200):
+    """Public Binance klines fallback (no API key)"""
+    try:
+        url = "https://api.binance.com/api/v3/klines"
+        resp = requests.get(url, params={"symbol": symbol, "interval": interval, "limit": limit}, timeout=10)
+        resp.raise_for_status()
+        raw = resp.json()
+        # parse to DataFrame-like list of dicts for compatibility usage (we will return list of dicts)
+        rows = []
+        for r in raw:
+            rows.append({
+                "open_time": int(r[0]),
+                "open": float(r[1]),
+                "high": float(r[2]),
+                "low": float(r[3]),
+                "close": float(r[4]),
+                "volume": float(r[5]),
+            })
+        return rows
+    except Exception:
+        logger.exception("binance_klines failed")
+        return None
+
+
+def fetch_klines_public(symbol: str, interval: str = "1h", limit: int = 200, exchange: str = "binance"):
+    """
+    Wrapper to return klines in a pandas-like list of dicts:
+    - Prefer fetch_klines_multi (your market_providers)
+    - Fallback to public binance
+    """
+    try:
+        if fetch_klines_multi:
+            try:
+                df = fetch_klines_multi(symbol=symbol, interval=interval, limit=limit, exchange=exchange)
+                # if returns pandas DataFrame keep it
+                return df
+            except Exception:
+                logger.exception("fetch_klines_multi failed")
+        # fallback: use binance public
+        return _binance_klines(symbol, interval, limit)
+    except Exception:
+        logger.exception("fetch_klines_public failed")
+        return None
+
+
+# ---------------------------
+# QuickChart helper (generate chart bytes) - uses quickchart public service
+# ---------------------------
+QUICKCHART_URL = "https://quickchart.io/chart"
+
+def generate_sparkline_bytes(values, label="price", width=800, height=300):
+    try:
+        cfg = {
+            "type": "line",
+            "data": {
+                "labels": list(range(len(values))),
+                "datasets": [{"label": label, "data": values, "fill": False, "pointRadius": 0}]
+            },
+            "options": {"plugins": {"legend": {"display": False}}, "elements": {"line": {"tension": 0}}}
+        }
+        params = {"c": json.dumps(cfg), "width": width, "height": height, "devicePixelRatio": 2}
+        r = requests.get(QUICKCHART_URL, params=params, timeout=12)
+        r.raise_for_status()
+        return r.content
+    except Exception:
+        logger.exception("generate_sparkline_bytes failed")
+        return None
+
+
+# ---------------------------
+# AI fallback small local analyzer (if ai_client not present)
+# ---------------------------
+def _local_ai_analysis(prompt: str):
+    # Minimalist deterministic response for when ai_analysis_text isn't configured.
+    # Keep it simple and safe.
+    try:
+        # guess sentiment by some keywords
+        up = len(re.findall(r"\b(up|bull|long|rally|breakout)\b", prompt, flags=re.I))
+        dn = len(re.findall(r"\b(down|bear|short|fall|reject)\b", prompt, flags=re.I))
+        score = 0.5 + (up - dn) * 0.05
+        score = max(0.0, min(1.0, score))
+        text = f"Local AI summary: approximate confidence {int(score*100)}%. (Limited local analysis — enable ai_client for richer output.)"
+        return {"ok": True, "analysis": text}
+    except Exception:
+        return {"ok": False, "error": "local_ai_failed"}
+
+
+# ---------------------------
+# Signal analysis & integration
+# ---------------------------
+def _safe_generate_signal(symbol: str, interval: str):
+    """
+    Primary path: use analyze_pair_multi_timeframes() from market_providers to get a multi-TF analysis.
+    If that fails, fallback to fetching klines and legacy signal_engine.
+    Returns a standardized dict:
+      { symbol, interval, signal, entry, sl, tp1, confidence, reasons }
+    """
+    try:
+        # 1) Try your project's multi-TF analyzer (best)
+        if analyze_pair_multi_timeframes:
+            try:
+                res = analyze_pair_multi_timeframes(symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval])
+                if isinstance(res, dict) and not res.get("error"):
+                    combined = res.get("combined_signal", "HOLD")
+                    score = float(res.get("combined_score", 0.0))
+
+                    # extract basic fields safely
+                    entry = None
+                    try:
+                        entry = (res["analysis"].get(interval, {}).get("close") or next(iter(res["analysis"].values())).get("close"))
+                    except Exception:
+                        entry = None
+
+                    sl = None
+                    tp1 = None
+                    try:
+                        sl = (res["analysis"].get("1h", {}).get("sl") or res["analysis"].get(interval, {}).get("sl"))
+                        tp1 = (res["analysis"].get("1h", {}).get("tp1") or res["analysis"].get(interval, {}).get("tp1"))
+                    except Exception:
+                        pass
+
+                    reasons = []
+                    try:
+                        for tf, info in res.get("analysis", {}).items():
+                            if isinstance(info, dict):
+                                reasons.extend(info.get("reasons", []))
+                    except Exception:
+                        pass
+
+                    # Optional AI augmentation (best effort)
+                    if ai_analysis_text and score > 0.3:
+                        try:
+                            prompt = f"Summarize confidence for {symbol} given analysis: {json.dumps(res)[:2000]}"
+                            resp = ai_analysis_text(prompt)
+                            ai_text = ""
+                            if isinstance(resp, dict):
+                                ai_text = resp.get("analysis") or ""
+                            else:
+                                ai_text = str(resp)
+                            m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", ai_text)
+                            if m:
+                                mod = float(m.group(1))
+                                score = max(0.0, min(1.0, score + mod))
+                                reasons.append("ai_adj")
+                        except Exception:
+                            logger.exception("AI augmentation attempt failed")
+
+                    return {
+                        "symbol": symbol.upper(),
+                        "interval": interval,
+                        "signal": "LONG" if "LONG" in combined or "STRONG_LONG" in combined else ("SHORT" if "SHORT" in combined or "STRONG_SHORT" in combined else "HOLD"),
+                        "entry": float(entry) if entry else None,
+                        "sl": float(sl) if sl else None,
+                        "tp1": float(tp1) if tp1 else None,
+                        "confidence": float(score),
+                        "reasons": list(dict.fromkeys(reasons)),
+                    }
+            except Exception:
+                logger.exception("analyze_pair_multi_timeframes failed; falling back")
+
+        # 2) Fallback: try to fetch klines for exchanges and run legacy generate_signal
+        exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
+        if fetch_klines_multi or True:
+            for ex in exchanges_to_try:
+                try:
+                    # Prefer fetch_klines_multi if present
+                    if fetch_klines_multi:
+                        df = None
+                        try:
+                            df = fetch_klines_multi(symbol, interval, limit=200, exchange=ex)
+                        except Exception:
+                            df = None
+                        if df is None:
+                            # fallback to public
+                            kl = fetch_klines_public(symbol, interval, limit=200, exchange=ex)
+                            df = kl
+                    else:
+                        df = fetch_klines_public(symbol, interval, limit=200, exchange=ex)
+
+                    # If still no data, continue
+                    if not df:
+                        continue
+
+                    # If legacy_generate_signal exists and df looks like DataFrame or list
+                    if legacy_generate_signal:
+                        try:
+                            out = legacy_generate_signal(df, pair=symbol) if callable(legacy_generate_signal) else legacy_generate_signal
+                            sig_text = str(out)
+                            if "BUY" in sig_text.upper() or "STRONG BUY" in sig_text.upper():
+                                sig = "LONG"
+                            elif "SELL" in sig_text.upper():
+                                sig = "SHORT"
+                            else:
+                                sig = "HOLD"
+                        except Exception:
+                            logger.exception("legacy_generate_signal failed")
+                            sig = "HOLD"
+                    else:
+                        # Simple local heuristic for fallback: look at last two closes if available
+                        try:
+                            # df may be list of dicts or pandas DataFrame
+                            closes = []
+                            if hasattr(df, "iloc"):
+                                # pandas-like
+                                closes = df["close"].astype(float).tolist()[-3:]
+                            elif isinstance(df, list) and len(df) > 0 and isinstance(df[0], dict):
+                                closes = [float(r["close"]) for r in df][-3:]
+                            if len(closes) >= 2:
+                                sig = "LONG" if closes[-1] > closes[-2] else "SHORT" if closes[-1] < closes[-2] else "HOLD"
+                            else:
+                                sig = "HOLD"
+                        except Exception:
+                            sig = "HOLD"
+
+                    # Estimate entry/sl/tp using simple ATR-like measure if data available
+                    try:
+                        highs = []
+                        lows = []
+                        closes = []
+                        if hasattr(df, "iloc"):
+                            highs = df["high"].astype(float)
+                            lows = df["low"].astype(float)
+                            closes = df["close"].astype(float)
+                            atr_val = (highs - lows).rolling(14).mean().iloc[-1]
+                            last = float(closes.iloc[-1])
+                        elif isinstance(df, list) and isinstance(df[0], dict):
+                            highs = [float(r["high"]) for r in df]
+                            lows = [float(r["low"]) for r in df]
+                            closes = [float(r["close"]) for r in df]
+                            # crude atr
+                            diffs = [h - l for h, l in zip(highs[-14:], lows[-14:])] if len(highs) >= 14 else [h - l for h, l in zip(highs, lows)]
+                            atr_val = sum(diffs) / len(diffs) if diffs else 0.0
+                            last = closes[-1] if closes else None
+                        else:
+                            atr_val = 0.0
+                            last = None
+
+                        if last is not None and atr_val:
+                            if sig == "LONG":
+                                sl = last - (atr_val * 1.5)
+                                tp1 = last + (atr_val * 1.5)
+                            elif sig == "SHORT":
+                                sl = last + (atr_val * 1.5)
+                                tp1 = last - (atr_val * 1.5)
+                            else:
+                                sl = last * 0.995
+                                tp1 = last * 1.005
+                        else:
+                            sl = None
+                            tp1 = None
+                    except Exception:
+                        sl = None
+                        tp1 = None
+
+                    confidence = 0.35  # baseline
+                    reasons = [f"fallback_{ex}"]
+                    return {
+                        "symbol": symbol.upper(),
+                        "interval": interval,
+                        "signal": sig,
+                        "entry": float(last) if last else None,
+                        "sl": float(sl) if sl else None,
+                        "tp1": float(tp1) if tp1 else None,
+                        "confidence": float(confidence),
+                        "reasons": reasons,
+                    }
+                except Exception:
+                    logger.exception("fetch_klines attempt failed for exchange %s", ex)
+                    continue
+            return {"error": "no_data_on_exchanges"}
+        else:
+            return {"error": "no_fetch_klines_available"}
+    except Exception as exc:
+        logger.exception("_safe_generate_signal unexpected error")
+        return {"error": str(exc)}
+
+
+# ---------------------------
+# Record + send signal (image-first)
+# ---------------------------
+def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
+    """Record a signal in storage and send it (image + caption)."""
+    # storage read
+    try:
+        d = load_data() if load_data else {}
+    except Exception:
+        d = {}
+
+    sig_id = f"S{int(time.time())}"
+    balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
+
+    # risk and pos
+    risk_amt, pos_size = compute_risk_and_size(sig.get("entry") or 0.0, sig.get("sl") or 0.0, balance, RISK_PERCENT)
+
+    rec = {
+        "id": sig_id,
+        "signal": sig,
+        "time": datetime.utcnow().isoformat(),
+        "risk_amt": risk_amt,
+        "pos_size": pos_size,
+        "user": user_id or ADMIN_ID,
+        "auto": bool(auto),
+    }
+
+    # save record
+    try:
+        if isinstance(d, dict):
+            d.setdefault("signals", []).append(rec)
+            d.setdefault("stats", {})
+            d["stats"]["total_signals"] = d["stats"].get("total_signals", 0) + 1
+            if save_data:
+                save_data(d)
+    except Exception:
+        logger.exception("Failed to save signal record")
+
+    # Text lines to render on image (per your requirement: all text inside images)
+    lines = []
+    try:
+        lines.append(f"ID: {sig_id}  {sig.get('symbol')} | {sig.get('interval')}")
+        lines.append(f"Signal: {sig.get('signal')}")
+        lines.append(f"Entry: {sig.get('entry') or 'N/A'}  SL: {sig.get('sl') or 'N/A'}  TP1: {sig.get('tp1') or 'N/A'}")
+        confidence_pct = int(sig.get("confidence", 0) * 100)
+        lines.append(f"Confidence: {confidence_pct}%  Risk: ${risk_amt}")
+        reasons = sig.get("reasons", []) or []
+        lines.append("Reasons: " + (", ".join(reasons[:3]) or "None"))
+    except Exception:
+        lines = [f"Signal for {sig.get('symbol')}"]
+
+    # Try to attach a quickchart for the symbol (60 closes) - best-effort
+    chart_bytes = None
+    try:
+        # attempt to fetch closes using fetch_klines_multi or public
+        kl = fetch_klines_public(sig.get("symbol") or sig.get("symbol"), interval=sig.get("interval") or SIGNAL_INTERVAL_DEFAULT, limit=60, exchange="binance")
+        closes = []
+        if kl:
+            if hasattr(kl, "iloc"):
+                # pandas
+                closes = kl["close"].astype(float).tolist()[-60:]
+            elif isinstance(kl, list) and isinstance(kl[0], dict):
+                closes = [float(r["close"]) for r in kl][-60:]
+        if closes:
+            chart_bytes = generate_sparkline_bytes(closes, label=sig.get("symbol"))
+    except Exception:
+        logger.exception("chart generation failed")
+
+    # Build image and send
+    try:
+        _send_branded(chat_id or ADMIN_ID, "\n".join(lines), lines_for_image=lines, chart_bytes=chart_bytes, reply_markup=None)
+    except Exception:
+        logger.exception("Failed to send signal image; falling back to message")
+        try:
+            bot.send_message(chat_id or ADMIN_ID, _append_brand("\n".join(lines)))
+        except Exception:
+            pass
+
+    # optionally send a quick AI rationale follow-up if available (as separate image)
+    try:
+        if ai_analysis_text and sig and not sig.get("error"):
+            prompt = f"Provide concise trade rationale for this signal:\n\n{json.dumps(sig, default=str)}"
+            ai_text = None
+            try:
+                resp = ai_analysis_text(prompt) if callable(ai_analysis_text) else None
+                if isinstance(resp, dict):
+                    ai_text = resp.get("analysis") or str(resp)
+                else:
+                    ai_text = str(resp)
+            except Exception:
+                ai_text = None
+
+            if not ai_text:
+                # local fallback
+                resp_local = _local_ai_analysis(prompt)
+                ai_text = resp_local.get("analysis") if isinstance(resp_local, dict) else str(resp_local)
+            if ai_text:
+                # render AI text into image
+                ai_lines = ["AI Rationale:"] + (ai_text.splitlines()[:8])
+                _send_branded(chat_id or ADMIN_ID, ai_text, lines_for_image=ai_lines)
+    except Exception:
+        logger.exception("AI rationale follow-up failed")
+
+    return sig_id
+
+
+# ---------------------------
+# Small background scanner wrappers
+# ---------------------------
 def _internal_scanner_loop(pairs, interval, exchanges, min_confidence, poll_seconds, use_ai):
     """
-    Fallback scanner used only when se_start_auto_scanner is not available.
+    Fallback scanner used when se_start_auto_scanner is not available.
     """
     logger.info("Fallback scanner started for pairs=%s interval=%s", pairs, interval)
     while not _scanner_stop_event.is_set():
@@ -345,21 +756,30 @@ def _internal_scanner_loop(pairs, interval, exchanges, min_confidence, poll_seco
                 if _scanner_stop_event.is_set():
                     break
                 try:
-                    # try to use generate_signal_multi if available
+                    # prefer generate_signal_multi if present
                     if generate_signal_multi:
-                        res = generate_signal_multi(p, interval, exchanges=exchanges, min_confidence_for_signal=min_confidence, use_ai_explain=use_ai)
+                        try:
+                            res = generate_signal_multi(p, interval, exchanges=exchanges, min_confidence_for_signal=min_confidence, use_ai_explain=use_ai)
+                        except Exception:
+                            res = _safe_generate_signal(p, interval)
                     else:
-                        # fallback to _safe_generate_signal
                         res = _safe_generate_signal(p, interval)
+
                     if not isinstance(res, dict):
                         continue
-                    conf = float(res.get("confidence", 0.0))
+                    conf = float(res.get("confidence", 0.0) or 0.0)
                     is_strong = (conf >= min_confidence) and (res.get("signal") in ("LONG", "SHORT"))
                     consensus = bool(res.get("consensus")) if isinstance(res.get("consensus"), bool) else False
                     if is_strong and (consensus or conf >= min_confidence):
                         logger.info("Fallback scanner: strong signal %s %s %.3f", p, res.get("signal"), conf)
-                        # Try to send
                         try:
+                            if register_send_callback:
+                                # notify registered systems
+                                try:
+                                    register_send_callback(lambda sig: None)
+                                except Exception:
+                                    pass
+                            # If AUTO_SEND is configured and admin policy allows, send
                             if AUTO_SEND_ONLY_ADMIN and ADMIN_ID:
                                 record_signal_and_send(res, chat_id=ADMIN_ID, user_id=ADMIN_ID, auto=True)
                             elif not AUTO_SEND_ONLY_ADMIN:
@@ -369,7 +789,7 @@ def _internal_scanner_loop(pairs, interval, exchanges, min_confidence, poll_seco
                 except Exception:
                     logger.exception("Fallback scanner: per-pair error")
             # sleep with interruption checks
-            for _ in range(int(poll_seconds)):
+            for _ in range(max(1, int(poll_seconds))):
                 if _scanner_stop_event.is_set():
                     break
                 time.sleep(1)
@@ -429,310 +849,9 @@ def stop_background_scanner(timeout: int = 5):
     return True
 
 
-# ----- signal generation integration -----
-def _safe_generate_signal(symbol: str, interval: str):
-    """
-    Primary path: use analyze_pair_multi_timeframes() from market_providers to get a multi-TF analysis.
-    If that fails, fallback to fetching klines and legacy signal_engine.
-    Returns a standardized dict:
-      { symbol, interval, signal, entry, sl, tp1, confidence, reasons }
-    """
-    try:
-        # 1) Try the multi-TF analyzer (best)
-        if analyze_pair_multi_timeframes:
-            try:
-                res = analyze_pair_multi_timeframes(
-                    symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval]
-                )
-                if isinstance(res, dict) and not res.get("error"):
-                    combined = res.get("combined_signal", "HOLD")
-                    score = float(res.get("combined_score", 0.0))
-
-                    # pick entry/sl/tp1 from analysis if available
-                    entry = None
-                    try:
-                        entry = (
-                            res["analysis"].get(interval, {}).get("close")
-                            or next(iter(res["analysis"].values())).get("close")
-                        )
-                    except Exception:
-                        entry = None
-
-                    sl = None
-                    tp1 = None
-                    try:
-                        sl = (
-                            res["analysis"].get("1h", {}).get("sl")
-                            or res["analysis"].get(interval, {}).get("sl")
-                        )
-                        tp1 = (
-                            res["analysis"].get("1h", {}).get("tp1")
-                            or res["analysis"].get(interval, {}).get("tp1")
-                        )
-                    except Exception:
-                        pass
-
-                    reasons = []
-                    try:
-                        for tf, info in res.get("analysis", {}).items():
-                            if isinstance(info, dict):
-                                reasons.extend(info.get("reasons", []))
-                    except Exception:
-                        pass
-
-                    # Optional AI augmentation
-                    if ai_analysis_text and score > 0.4 and callable(ai_analysis_text):
-                        try:
-                            res_text = _json.dumps(res, indent=2) if not isinstance(res, str) else res
-                            prompt = (
-                                "Given the following multi-timeframe analysis for "
-                                f"{symbol} on {interval}:\n\n{res_text}\n\n"
-                                "Provide concise trade rationale and, if appropriate, a trust modifier between -0.05 and +0.1 to adjust confidence. "
-                                "Reply with a short text containing a numeric modifier if needed."
-                            )
-                            ai_resp = ai_analysis_text(prompt)
-                            # ai_analysis_text may return dict with 'analysis' or a string
-                            ai_text = ""
-                            if isinstance(ai_resp, dict):
-                                ai_text = ai_resp.get("analysis") or ""
-                            else:
-                                ai_text = str(ai_resp)
-                            m = re.search(r"([+-]?[0-9]*\.?[0-9]+)", ai_text)
-                            if m:
-                                mod = float(m.group(1))
-                                score = max(0.0, min(1.0, score + mod))
-                                reasons.append("ai_adj")
-                        except Exception:
-                            logger.exception("AI augmentation failed")
-
-                    return {
-                        "symbol": symbol.upper(),
-                        "interval": interval,
-                        "signal": "LONG"
-                        if "LONG" in combined or "STRONG_LONG" in combined
-                        else ("SHORT" if "SHORT" in combined or "STRONG_SHORT" in combined else "HOLD"),
-                        "entry": float(entry) if entry else None,
-                        "sl": float(sl) if sl else None,
-                        "tp1": float(tp1) if tp1 else None,
-                        "confidence": float(score),
-                        "reasons": list(dict.fromkeys(reasons)),
-                    }
-            except Exception:
-                logger.exception("analyze_pair_multi_timeframes failed; falling back")
-
-        ## 2) Fallback: try to fetch klines for exchange choices and run legacy generate_signal
-        exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
-        if fetch_klines_multi:
-            for ex in exchanges_to_try:
-                try:
-                    df = fetch_klines_multi(symbol, interval, limit=200, exchange=ex)
-                    if df is None:
-                        continue
-                    if hasattr(df, "empty") and df.empty:
-                        continue
-                    if "close" not in df:
-                        continue
-
-                    if legacy_generate_signal:
-                        try:
-                            out = (
-                                legacy_generate_signal(df, pair=symbol)
-                                if callable(legacy_generate_signal)
-                                else legacy_generate_signal
-                            )
-                            sig_text = str(out)
-                            if "BUY" in sig_text.upper() or "STRONG BUY" in sig_text.upper():
-                                sig = "LONG"
-                            elif "SELL" in sig_text.upper():
-                                sig = "SHORT"
-                            else:
-                                sig = "HOLD"
-
-                            # basic SL/TP using ATR-like estimation
-                            try:
-                                highs = df["high"].astype(float)
-                                lows = df["low"].astype(float)
-                                closes = df["close"].astype(float)
-                                atr_val = (highs - lows).rolling(14).mean().iloc[-1]
-                                last = float(closes.iloc[-1])
-                                if sig == "LONG":
-                                    sl = last - (atr_val * 1.5)
-                                    tp1 = last + (atr_val * 1.5)
-                                elif sig == "SHORT":
-                                    sl = last + (atr_val * 1.5)
-                                    tp1 = last - (atr_val * 1.5)
-                                else:
-                                    sl = last * 0.995
-                                    tp1 = last * 1.005
-                            except Exception:
-                                sl = None
-                                tp1 = None
-
-                            return {
-                                "symbol": symbol.upper(),
-                                "interval": interval,
-                                "signal": sig,
-                                "entry": float(closes.iloc[-1]),
-                                "sl": float(sl) if sl else None,
-                                "tp1": float(tp1) if tp1 else None,
-                                "confidence": 0.3,
-                                "reasons": [sig_text],
-                            }
-                        except Exception:
-                            logger.exception("legacy_generate_signal failed on df")
-                            continue
-                except Exception:
-                    logger.exception("fetch_klines_multi attempt failed")
-                    continue
-            return {"error": "no_data_on_exchanges"}
-        else:
-            return {"error": "no_fetch_klines_available"}
-    except Exception as exc:
-        logger.exception("_safe_generate_signal unexpected error")
-        return {"error": str(exc)}
-
-
-# ----- recording & messaging -----
-def record_signal_and_send(sig: dict, chat_id=None, user_id=None, auto=False):
-    """Record a signal in storage and send it (image + caption)."""
-    # storage read
-    try:
-        d = load_data() if load_data else {}
-    except Exception:
-        d = {}
-
-    sig_id = f"S{int(time.time())}"
-    balance = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
-
-    # risk and pos
-    risk_amt, pos_size = compute_risk_and_size(sig.get("entry") or 0.0, sig.get("sl") or 0.0, balance, RISK_PERCENT)
-
-    rec = {
-        "id": sig_id,
-        "signal": sig,
-        "time": datetime.utcnow().isoformat(),
-        "risk_amt": risk_amt,
-        "pos_size": pos_size,
-        "user": user_id or ADMIN_ID,
-        "auto": bool(auto),
-    }
-
-    # save record
-    try:
-        if isinstance(d, dict):
-            d.setdefault("signals", []).append(rec)
-            d.setdefault("stats", {})
-            d["stats"]["total_signals"] = d["stats"].get("total_signals", 0) + 1
-            try:
-                if save_data:
-                    save_data(d)
-                else:
-                    _save_local_data(d)
-            except Exception:
-                _save_local_data(d)
-    except Exception:
-        logger.exception("Failed to save signal record")
-
-    # Build caption
-    try:
-        confidence_pct = int(sig.get("confidence", 0) * 100)
-    except Exception:
-        confidence_pct = 0
-
-    caption = (
-        "🔔 <b>Destiny Trading Empire — Signal</b>\n\n"
-        f"ID: {sig_id} Pair: {sig.get('symbol')} | TF: {sig.get('interval')}\n"
-        f"Signal: <b>{sig.get('signal')}</b>\n"
-        f"Entry: {sig.get('entry') or 'N/A'} | SL: {sig.get('sl') or 'N/A'} | TP1: {sig.get('tp1') or 'N/A'}\n"
-        f"Confidence: {confidence_pct}% | Risk (USD): {risk_amt}\n"
-        f"Reasons: {', '.join(sig.get('reasons', []) or ['None'])}"
-    )
-    caption = _append_brand(caption)
-
-    # Image creation
-    img = None
-    try:
-        if generate_branded_signal_image and isinstance(sig, dict):
-            try:
-                img_buf, _ = generate_branded_signal_image(
-                    {
-                        "symbol": sig.get("symbol"),
-                        "analysis": None,
-                        "combined_score": sig.get("confidence", 0),
-                        "combined_signal": sig.get("signal"),
-                        "sl": sig.get("sl"),
-                        "tp1": sig.get("tp1"),
-                        "image": None,
-                        "caption_lines": [f"{sig.get('symbol')} | {sig.get('interval')} | {sig.get('signal')}"],
-                    }
-                )
-                if img_buf:
-                    img = img_buf
-            except Exception:
-                logger.exception("generate_branded_signal_image failed")
-
-        if not img and build_signal_image:
-            try:
-                img = build_signal_image(sig)
-            except Exception:
-                logger.exception("build_signal_image failed")
-    except Exception:
-        logger.exception("build_signal_image wrapper failed")
-
-    # Keyboard for message
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(types.InlineKeyboardButton("📷 Link PnL", callback_data=f"link_{sig_id}"))
-    kb.add(types.InlineKeyboardButton("🤖 AI Details", callback_data=f"ai_{sig_id}"))
-    kb.add(types.InlineKeyboardButton("🔁 Share", switch_inline_query=f"{sig.get('symbol')}"))
-
-    # send (use safe_send_with_image if available)
-    try:
-        if safe_send_with_image:
-            safe_send_with_image(bot, chat_id or ADMIN_ID, caption, img, kb)
-        else:
-            if img:
-                try:
-                    img.seek(0)
-                except Exception:
-                    pass
-                bot.send_photo(chat_id or ADMIN_ID, img, caption=caption, reply_markup=kb)
-            else:
-                bot.send_message(chat_id or ADMIN_ID, caption, reply_markup=kb)
-    except Exception:
-        logger.exception("Failed to send signal message")
-
-    # optionally send a quick AI rationale follow-up if available
-    try:
-        if ai_analysis_text and sig and not sig.get("error"):
-            prompt = f"Provide concise trade rationale for this signal:\n\n{_json.dumps(sig, default=str)}"
-            ai_text = None
-            try:
-                resp = ai_analysis_text(prompt) if callable(ai_analysis_text) else None
-                if isinstance(resp, dict):
-                    ai_text = resp.get("analysis") or str(resp)
-                else:
-                    ai_text = str(resp)
-            except Exception:
-                ai_text = None
-            if ai_text:
-                follow = _append_brand(f"🤖 AI Rationale: {ai_text}")
-                try:
-                    bot.send_message(chat_id or ADMIN_ID, follow)
-                except Exception:
-                    logger.exception("Failed to send AI follow-up")
-    except Exception:
-        logger.exception("AI rationale follow-up failed")
-
-    # mark as sent for cooldown rules
-    try:
-        mark_signal_sent(sig.get("symbol") or "UNKNOWN", sig.get("interval") or SIGNAL_INTERVAL_DEFAULT)
-    except Exception:
-        pass
-
-    return sig_id
-
-
-# ----- keyboard UI -----
+# ---------------------------
+# Keyboard UI
+# ---------------------------
 def main_keyboard():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(types.InlineKeyboardButton("📈 Get Signals", callback_data="get_signal"),
@@ -762,21 +881,15 @@ def cmd_start(msg):
             "Welcome — Destiny Trading Empire Bot 💎",
             "Use the buttons to get signals, start scanners, view trending pairs.",
         ]
-        if create_brand_image:
-            try:
-                img = create_brand_image(lines, title="Destiny Trading Empire Bot 💎")
-                if safe_send_with_image:
-                    safe_send_with_image(bot, msg.chat.id, _append_brand(text), img, reply_markup=main_keyboard())
-                    return
-                else:
-                    try:
-                        img.seek(0)
-                    except Exception:
-                        pass
-                    bot.send_photo(msg.chat.id, img, caption=_append_brand(text), reply_markup=main_keyboard())
-                    return
-            except Exception:
-                logger.exception("Failed creating welcome brand image")
+        # always present as image (per your request)
+        try:
+            img = create_brand_image(lines, title="Destiny Trading Empire Bot 💎")
+            if img:
+                safe_send_with_image(bot, msg.chat.id, "", img, reply_markup=main_keyboard())
+                return
+        except Exception:
+            logger.exception("Failed creating welcome brand image")
+        # fallback
         bot.send_message(msg.chat.id, _append_brand(text), reply_markup=main_keyboard())
     except Exception:
         logger.exception("cmd_start failed")
@@ -787,24 +900,13 @@ def photo_handler(message):
     try:
         fi = bot.get_file(message.photo[-1].file_id)
         data = bot.download_file(fi.file_path)
-        # try to use configured record_pnl_screenshot or fallback
-        saved_path = None
-        try:
-            if record_pnl_screenshot and callable(record_pnl_screenshot):
-                # some recorders expect (bytes, name, user, caption)
-                saved = record_pnl_screenshot(data, datetime.utcnow().strftime("%Y%m%d_%H%M%S"), message.from_user.id, message.caption)
-                saved_path = saved if isinstance(saved, str) else None
-            else:
-                # fallback: write locally
-                saved_path = _record_pnl_local(data, "pnl", message.from_user.id, caption=message.caption)
-        except Exception:
-            logger.exception("photo save fallback failed")
-            saved_path = _record_pnl_local(data, "pnl", message.from_user.id, caption=message.caption)
-
-        bot.reply_to(message, _append_brand(f"Saved screenshot. File: {saved_path or 'unknown'}. Reply with `#link <signal_id> TP1` or `#link <signal_id> SL`"))
+        if record_pnl_screenshot:
+            record_pnl_screenshot(data, datetime.utcnow().strftime("%Y%m%d_%H%M%S"), message.from_user.id, message.caption)
+        # respond with branded image saying saved
+        _send_branded(message.chat.id, "Saved screenshot. Reply with `#link <signal_id> TP1` or `#link <signal_id> SL`", lines_for_image=["Screenshot saved"])
     except Exception:
         logger.exception("photo_handler failed")
-        bot.reply_to(message, _append_brand("Failed to save screenshot."))
+        _send_branded(message.chat.id, "Failed to save screenshot.", lines_for_image=["Save failed"])
 
 
 @bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().startswith("#link"))
@@ -812,7 +914,7 @@ def link_handler(message):
     try:
         parts = message.text.strip().split()
         if len(parts) < 3:
-            bot.reply_to(message, _append_brand("Usage: #link <signal_id> TP1 or SL"))
+            _send_branded(message.chat.id, "Usage: #link <signal_id> TP1 or SL", lines_for_image=["Usage: #link <signal_id> TP1 or SL"])
             return
         sig_id, tag = parts[1], parts[2].upper()
         d = load_data() if load_data else {}
@@ -825,7 +927,7 @@ def link_handler(message):
             else None
         )
         if not pnl_item:
-            bot.reply_to(message, _append_brand("No unlinked screenshot found."))
+            _send_branded(message.chat.id, "No unlinked screenshot found.", lines_for_image=["No unlinked screenshot found"])
             return
         pnl_item["linked"] = {"signal_id": sig_id, "result": tag, "linked_by": message.from_user.id}
         # only admin confirmation updates balance
@@ -841,17 +943,12 @@ def link_handler(message):
                     d["challenge"]["balance"] = d["challenge"].get("balance", CHALLENGE_START) - risk
                     d["challenge"]["losses"] = d["challenge"].get("losses", 0) + 1
                     d["stats"]["losses"] = d["stats"].get("losses", 0) + 1
-        try:
-            if save_data:
-                save_data(d)
-            else:
-                _save_local_data(d)
-        except Exception:
-            _save_local_data(d)
-        bot.reply_to(message, _append_brand(f"Linked screenshot to {sig_id} as {tag}. Admin confirmation updates balance."))
+        if save_data and isinstance(d, dict):
+            save_data(d)
+        _send_branded(message.chat.id, f"Linked screenshot to {sig_id} as {tag}. Admin confirmation updates balance.", lines_for_image=[f"Linked {sig_id} as {tag}"])
     except Exception:
         logger.exception("link_handler failed")
-        bot.reply_to(message, _append_brand("Failed to link screenshot."))
+        _send_branded(message.chat.id, "Failed to link screenshot.", lines_for_image=["Failed to link screenshot"])
 
 
 # ----- Callback actions -----
@@ -860,7 +957,7 @@ def callback_handler(call):
     try:
         cid = call.message.chat.id
         data = call.data
-        # make sure to answer callback quickly to avoid spinner
+        # answer callback quickly to avoid spinner
         try:
             bot.answer_callback_query(call.id)
         except Exception:
@@ -871,7 +968,7 @@ def callback_handler(call):
             kb = types.InlineKeyboardMarkup()
             for p in PAIRS:
                 kb.add(types.InlineKeyboardButton(p, callback_data=f"sig_{p}"))
-            bot.send_message(cid, _append_brand("Choose pair to analyze:"), reply_markup=kb)
+            _send_branded(cid, "Choose pair to analyze:", lines_for_image=["Choose pair to analyze:"], reply_markup=kb)
             return
 
         # individual pair selected
@@ -880,11 +977,9 @@ def callback_handler(call):
             bot.send_chat_action(cid, "typing")
             sig = _safe_generate_signal(pair, SIGNAL_INTERVAL_DEFAULT)
             if sig.get("error"):
-                # if no data try again with a different exchange/timeframe message
                 err = sig.get("error")
-                bot.send_message(cid, _append_brand(f"Error generating signal: {err}\nTry another timeframe or check pair symbol."))
+                _send_branded(cid, f"Error generating signal: {err}\nTry another timeframe or check pair symbol.", lines_for_image=[f"Error: {err}"])
                 return
-            # Standardize missing fields
             sig.setdefault("interval", SIGNAL_INTERVAL_DEFAULT)
             sig.setdefault("symbol", pair.upper())
             record_signal_and_send(sig, chat_id=cid, user_id=call.from_user.id, auto=False)
@@ -892,7 +987,7 @@ def callback_handler(call):
 
         # quick scan top X
         if data == "scan_top4":
-            bot.send_message(cid, _append_brand("🔎 Scanning top pairs across exchanges..."))
+            _send_branded(cid, "🔎 Scanning top pairs across exchanges...", lines_for_image=["Scanning..."])
             for p in PAIRS[:6]:
                 try:
                     if can_send_signal(p, SIGNAL_INTERVAL_DEFAULT):
@@ -904,72 +999,69 @@ def callback_handler(call):
             return
 
         if data == "trending":
-            bot.send_message(cid, _append_brand("📡 Fetching multi-exchange trending pairs... please wait."))
+            _send_branded(cid, "📡 Fetching multi-exchange trending pairs... please wait.", lines_for_image=["Fetching trending pairs..."])
             try:
-                # support multi-exchange aggregation if detect_strong_signals available
                 if fetch_trending_pairs_branded:
                     img_buf, caption = fetch_trending_pairs_branded(limit=8)
                     if img_buf:
-                        if safe_send_with_image:
-                            safe_send_with_image(bot, cid, _append_brand(caption), img_buf)
-                        else:
-                            try:
-                                img_buf.seek(0)
-                            except Exception:
-                                pass
-                            bot.send_photo(cid, img_buf, caption=_append_brand(caption))
+                        safe_send_with_image(bot, cid, "", img_buf)
                     else:
-                        bot.send_message(cid, _append_brand(caption))
+                        _send_branded(cid, caption or "No trending data", lines_for_image=[caption or "No trending data"])
                 elif fetch_trending_pairs_text:
-                    bot.send_message(cid, _append_brand(fetch_trending_pairs_text()))
+                    txt = fetch_trending_pairs_text()
+                    _send_branded(cid, txt, lines_for_image=txt.splitlines()[:8])
                 else:
-                    bot.send_message(cid, _append_brand("Trending feature not available (missing market_providers)."))
+                    # fallback: call CoinGecko trending endpoint
+                    try:
+                        cg = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=8).json()
+                        coins = [f"{i['item']['name']} ({i['item']['symbol']})" for i in cg.get("coins", [])]
+                        _send_branded(cid, "Trending coins:\n" + "\n".join(coins[:8]), lines_for_image=coins[:8])
+                    except Exception:
+                        _send_branded(cid, "Trending feature not available (missing market_providers).", lines_for_image=["Trending not available"])
             except Exception:
                 logger.exception("trending handler failed")
-                bot.send_message(cid, _append_brand("Failed to fetch trending pairs."))
-            return
-
-        if data == "market_news":
-            # Try to produce something useful: F&G + top movers + short AI brief if available
-            try:
-                lines = []
-                if fear_and_greed_index:
-                    try:
-                        fg = fear_and_greed_index()
-                        lines.append(fg)
-                    except Exception:
-                        pass
-                if top_gainers_pairs:
-                    try:
-                        t = top_gainers_pairs(limit=5)
-                        lines.append(t)
-                    except Exception:
-                        pass
-                # if we have ai_market_brief_text and a popular symbol
-                if ai_market_brief_text and PAIRS:
-                    try:
-                        brief = ai_market_brief_text(PAIRS[0], exchanges=["binance", "bybit", "kucoin"])
-                        lines.append("AI Brief:\n" + brief)
-                    except Exception:
-                        pass
-                if lines:
-                    bot.send_message(cid, _append_brand("\n\n".join(lines)))
-                else:
-                    bot.send_message(cid, _append_brand("📰 Market news: feature not available (no providers configured)."))
-            except Exception:
-                logger.exception("market_news failed")
-                bot.send_message(cid, _append_brand("Failed to fetch market news."))
+                _send_branded(cid, "Failed to fetch trending pairs.", lines_for_image=["Failed to fetch trending pairs"])
             return
 
         if data == "bot_status":
             # provide brief health info and whether scanner is running
             scanner_running = _scanner_thread is not None and _scanner_thread.is_alive()
-            msg = (
-                "⚙️ Bot is running ✅\n"
-                f"Scanner running: {scanner_running}\n"
-                f"Auto confidence threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%"
-            )
-            bot.send_message(cid, _append_brand(msg))
+            msg_lines = [
+                "⚙️ Bot Status",
+                f"Running: ✅",
+                f"Scanner running: {scanner_running}",
+                f"Auto confidence threshold: {AUTO_CONFIDENCE_THRESHOLD*100:.0f}%",
+            ]
+            _send_branded(cid, "\n".join(msg_lines), lines_for_image=msg_lines)
+            return
+
+        if data == "market_news":
+            # market news: use CoinGecko / reddit/trending or simple curated headlines via cointelegraph RSS? We'll use CoinGecko trending + fallback notes
+            try:
+                try:
+                    # simple approach: get coin market data top movers
+                    r = requests.get("https://api.coingecko.com/api/v3/search/trending", timeout=8)
+                    r.raise_for_status()
+                    trending_json = r.json()
+                    lines = ["Market News — Trending coins"]
+                    for i in trending_json.get("coins", [])[:8]:
+                        it = i.get("item", {})
+                        lines.append(f"{it.get('name')} ({it.get('symbol')}) — Rank {it.get('market_cap_rank')}")
+                    _send_branded(cid, "\n".join(lines), lines_for_image=lines)
+                except Exception:
+                    # fallback: list top gainers from Binance public ticker endpoint
+                    r2 = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=8)
+                    r2.raise_for_status()
+                    arr = r2.json()
+                    # pick top 6 by priceChangePercent
+                    arr_sorted = sorted(arr, key=lambda x: float(x.get("priceChangePercent", 0)), reverse=True)
+                    lines = ["Market News — Binance top movers"]
+                    for a in arr_sorted[:6]:
+                        lines.append(f"{a.get('symbol')}: {float(a.get('priceChangePercent',0)):+.2f}% vol:{int(float(a.get('quoteVolume',0))):,}")
+                    _send_branded(cid, "\n".join(lines), lines_for_image=lines)
+            except Exception:
+                logger.exception("market_news failed")
+                _send_branded(cid, "📰 Market news: feature coming soon", lines_for_image=["Market news coming soon"])
             return
 
         if data == "challenge_status":
@@ -977,70 +1069,49 @@ def callback_handler(call):
             bal = d.get("challenge", {}).get("balance", CHALLENGE_START) if isinstance(d, dict) else CHALLENGE_START
             wins = d.get("challenge", {}).get("wins", 0) if isinstance(d, dict) else 0
             losses = d.get("challenge", {}).get("losses", 0) if isinstance(d, dict) else 0
-            bot.send_message(cid, _append_brand(f"Balance: ${bal:.2f}\nWins: {wins} Losses: {losses}"))
+            _send_branded(cid, f"Balance: ${bal:.2f}\nWins: {wins} Losses: {losses}", lines_for_image=[f"Balance: ${bal:.2f}", f"Wins: {wins} Losses: {losses}"])
             return
 
         if data == "ask_ai":
-            bot.send_message(cid, _append_brand("🤖 Ask AI: send a message starting with `AI:` followed by your question."))
+            # instruct user how to ask AI; accept AI: prefixed messages via message handler (not implemented here)
+            _send_branded(cid, "🤖 Ask AI: send a message starting with `AI:` followed by your question.", lines_for_image=["Ask AI: send a message starting with 'AI:' followed by your question."])
             return
 
         if data == "refresh_bot":
-            bot.send_message(cid, _append_brand("🔄 Refreshing bot session..."))
+            _send_branded(cid, "🔄 Refreshing bot session...", lines_for_image=["Refreshing bot session..."])
             stop_existing_bot_instances()
             time.sleep(2)
-            bot.send_message(cid, _append_brand("✅ Refreshed."))
+            _send_branded(cid, "✅ Refreshed.", lines_for_image=["Refreshed"])
             return
 
         if data == "start_auto_brief":
-            bot.send_message(cid, _append_brand("▶ Starting background market scanner (auto-send strong signals)."))
+            _send_branded(cid, "▶ Starting background market scanner (auto-send strong signals).", lines_for_image=["Starting scanner..."])
             start_background_scanner()
             return
 
         if data == "stop_auto_brief":
-            bot.send_message(cid, _append_brand("⏹ Stopping background market scanner."))
+            _send_branded(cid, "⏹ Stopping background market scanner.", lines_for_image=["Stopping scanner..."])
             stop_background_scanner()
             return
 
         # Scheduler-based auto briefs (text/AI summaries)
         if data == "start_auto_brief_scheduler":
             if start_scheduler:
-                bot.send_message(cid, _append_brand("▶ Scheduler for auto-briefs enabled. You will receive periodic market briefs."))
+                _send_branded(cid, "▶ Scheduler for auto-briefs enabled. You will receive periodic market briefs.", lines_for_image=["Scheduler enabled"])
                 try:
                     start_scheduler(bot)
                 except Exception:
                     logger.exception("start_scheduler failed")
             else:
-                bot.send_message(cid, _append_brand("Scheduler not available (missing scheduler module)."))
+                _send_branded(cid, "Scheduler not available (missing scheduler module).", lines_for_image=["Scheduler missing"])
             return
 
         if data == "stop_auto_brief_scheduler":
             if stop_scheduler:
                 stop_scheduler()
-                bot.send_message(cid, _append_brand("⏹ Scheduler for auto-briefs disabled."))
+                _send_branded(cid, "⏹ Scheduler for auto-briefs disabled.", lines_for_image=["Scheduler disabled"])
             else:
-                bot.send_message(cid, _append_brand("Scheduler not available (missing scheduler module)."))
-            return
-
-        if data == "pnl_upload":
-            bot.send_message(cid, _append_brand("📷 Upload PnL: send a photo of your PnL now. Use /menu to return."))
-            return
-
-        if data == "history":
-            try:
-                d = load_data() if load_data else {}
-                sigs = d.get("signals", []) if isinstance(d, dict) else []
-                last = sigs[-5:] if len(sigs) else []
-                if not last:
-                    bot.send_message(cid, _append_brand("No signal history yet."))
-                    return
-                lines = []
-                for s in reversed(last):
-                    sig = s.get("signal", {})
-                    lines.append(f"{s['id']}: {sig.get('symbol')} {sig.get('signal')} ({sig.get('confidence')*100 if sig.get('confidence') else 0:.0f}%) at {s.get('time')}")
-                bot.send_message(cid, _append_brand("Recent Signals:\n" + "\n".join(lines)))
-            except Exception:
-                logger.exception("history fetch failed")
-                bot.send_message(cid, _append_brand("Failed to fetch history."))
+                _send_branded(cid, "Scheduler not available (missing scheduler module).", lines_for_image=["Scheduler missing"])
             return
 
         if data.startswith("ai_"):
@@ -1048,19 +1119,22 @@ def callback_handler(call):
             d = load_data() if load_data else {}
             rec = next((s for s in d.get("signals", []) if s["id"] == sig_id), None) if isinstance(d, dict) else None
             if not rec:
-                bot.send_message(cid, _append_brand("Signal not found"))
+                _send_branded(cid, "Signal not found", lines_for_image=["Signal not found"])
                 return
             prompt = f"Provide trade rationale, risk controls and a recommended leverage for this trade:\n{rec['signal']}"
             ai_text = None
             try:
-                resp = ai_analysis_text(prompt) if callable(ai_analysis_text) else None
-                if isinstance(resp, dict):
-                    ai_text = resp.get("analysis") or str(resp)
+                if ai_analysis_text and callable(ai_analysis_text):
+                    resp = ai_analysis_text(prompt)
+                    if isinstance(resp, dict):
+                        ai_text = resp.get("analysis") or str(resp)
+                    else:
+                        ai_text = str(resp)
                 else:
-                    ai_text = str(resp) if resp else "AI feature not available"
+                    ai_text = _local_ai_analysis(prompt).get("analysis")
             except Exception:
                 ai_text = "AI feature error"
-            bot.send_message(cid, _append_brand(f"🤖 AI analysis:\n{ai_text}"))
+            _send_branded(cid, f"🤖 AI analysis:\n{ai_text}", lines_for_image=(ai_text.splitlines()[:8] if ai_text else ["AI error"]))
             return
 
         bot.send_message(cid, _append_brand("Unknown action"))
@@ -1072,49 +1146,32 @@ def callback_handler(call):
             pass
 
 
-# ----- simple AI text handler for messages starting with "AI:" -----
-@bot.message_handler(func=lambda m: isinstance(m.text, str) and m.text.strip().upper().startswith("AI:"))
-def ai_message_handler(message):
-    try:
-        prompt = message.text.strip()[3:].strip()
-        if not prompt:
-            bot.reply_to(message, _append_brand("Please provide a question after `AI:`"))
-            return
-        if not ai_analysis_text or not callable(ai_analysis_text):
-            bot.reply_to(message, _append_brand("AI features not configured on this deployment."))
-            return
-        bot.send_chat_action(message.chat.id, "typing")
-        try:
-            resp = ai_analysis_text(prompt)
-            if isinstance(resp, dict):
-                out = resp.get("analysis") or str(resp)
-            else:
-                out = str(resp)
-            bot.reply_to(message, _append_brand(f"🤖 AI Reply:\n{out}"))
-        except Exception:
-            logger.exception("ai_message_handler failed")
-            bot.reply_to(message, _append_brand("AI service error."))
-    except Exception:
-        logger.exception("ai_message_handler top-level failed")
-        bot.reply_to(message, _append_brand("Failed to process AI request."))
-
-
 # If this file is executed directly allow a small self-test message (optional)
 def start_bot_polling():
     """
-    Starts the Telegram bot polling for Destiny Trading Empire.
-    This allows bot.py to launch it in a background thread.
+    Start the bot polling loop. Exposed so your bot.py can import and call it.
     """
-    import logging
-    import telebot
-    global bot  # if already declared earlier
-
     try:
-        logging.info("🚀 Starting Destiny Trading Empire Bot polling...")
-        bot.infinity_polling(timeout=60, long_polling_timeout=30)
-    except Exception as e:
-        logging.exception(f"Polling crashed: {e}")
+        logger.info("Starting bot polling")
+        # stop other instances if possible
+        stop_existing_bot_instances()
+        # Telebot has infinity_polling in recent versions; fallback to polling
+        try:
+            if hasattr(bot, "infinity_polling"):
+                bot.infinity_polling(timeout=60, long_polling_timeout=80)
+            else:
+                bot.polling(none_stop=True)
+        except KeyboardInterrupt:
+            logger.info("Polling stopped by user")
+        except Exception:
+            logger.exception("Bot polling crashed")
+            raise
+    except Exception:
+        logger.exception("start_bot_polling failed")
+        raise
+
+
 if __name__ == "__main__":
     print("bot_runner.py loaded - sanity check")
     logger.info("bot_runner loaded. Ready.")
-    
+
