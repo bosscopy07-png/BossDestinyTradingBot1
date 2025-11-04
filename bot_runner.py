@@ -1100,6 +1100,20 @@ def ai_message_handler(message):
 
 
 # If this file is executed directly allow a small self-test message (optional)
+def start_bot_polling():
+    """
+    Starts the Telegram bot polling for Destiny Trading Empire.
+    This allows bot.py to launch it in a background thread.
+    """
+    import logging
+    import telebot
+    global bot  # if already declared earlier
+
+    try:
+        logging.info("🚀 Starting Destiny Trading Empire Bot polling...")
+        bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    except Exception as e:
+        logging.exception(f"Polling crashed: {e}")
 if __name__ == "__main__":
     print("bot_runner.py loaded - sanity check")
     logger.info("bot_runner loaded. Ready.")
