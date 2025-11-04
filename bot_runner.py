@@ -1,6 +1,16 @@
-import os import time import threading import traceback import requests import logging from datetime import datetime import telebot from telebot import types import json import re
+import os 
+import time 
+import threading 
+import traceback 
+import requests 
+import logging from datetime 
+import datetime 
+import telebot from telebot 
+import types 
+import json 
+import re
 
------ Branding and global constants -----
+# ----- Branding and global constants -----
 
 BRAND_TAG = "
 
@@ -20,7 +30,7 @@ AUTO_CONFIDENCE_THRESHOLD = float( os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90"
 
 if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN environment variable required")
 
------ Logging & storage init -----
+# ----- Logging & storage init -----
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s") logger = logging.getLogger("bot_runner")
 
@@ -40,8 +50,7 @@ Safe import of ai_client (may expose multiple helpers)
 
 try: from ai_client import ( ai_analysis_text, ExchangeStreamer, ImageAnalyzer, SignalGenerator, analyze_image_and_signal, ) except Exception: ai_analysis_text = None ExchangeStreamer = None ImageAnalyzer = None SignalGenerator = None analyze_image_and_signal = None logger.exception("ai_client import failed")
 
-try: 
-from pro_features import (
+try: from pro_features import (
     top_gainers_pairs,
     fear_and_greed_index,
     futures_leverage_suggestion,
