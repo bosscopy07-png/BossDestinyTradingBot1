@@ -14,7 +14,7 @@ import re
 
 BRAND_TAG = "— <b>Destiny Trading Empire Bot 💎</b>"
 
-Config from env (with sane defaults)
+# Config from env (with sane defaults)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN") ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) PAIRS = os.getenv( "PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,MATICUSDT,ADAUSDT", ).split(",")
 
