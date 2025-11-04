@@ -12,9 +12,7 @@ import re
 
 # ----- Branding and global constants -----
 
-BRAND_TAG = "
-
-— <b>Destiny Trading Empire Bot 💎</b>"
+BRAND_TAG = "— <b>Destiny Trading Empire Bot 💎</b>"
 
 Config from env (with sane defaults)
 
