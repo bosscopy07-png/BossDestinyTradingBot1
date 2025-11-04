@@ -40,7 +40,16 @@ Safe import of ai_client (may expose multiple helpers)
 
 try: from ai_client import ( ai_analysis_text, ExchangeStreamer, ImageAnalyzer, SignalGenerator, analyze_image_and_signal, ) except Exception: ai_analysis_text = None ExchangeStreamer = None ImageAnalyzer = None SignalGenerator = None analyze_image_and_signal = None logger.exception("ai_client import failed")
 
-try: from pro_features import ( top_gainers_pairs, fear_and_greed_index, futures_leverage_suggestion, quickchart_price_image, ai_market_brief_text, ) except Exception: top_gainers_pairs = None fear_and_greed_index = None futures_leverage_suggestion = None quickchart_price_image = None ai_market_brief_text = None logger.exception("pro_features import failed")
+try: 
+from pro_features import (
+    top_gainers_pairs,
+    fear_and_greed_index,
+    futures_leverage_suggestion,
+    quickchart_price_image,
+    ai_market_brief_text,
+    momentum_and_candle_analysis,
+    pro_market_report,
+    get_multi_exchange_snapshot, ai_market_brief_text, ) except Exception: top_gainers_pairs = None fear_and_greed_index = None futures_leverage_suggestion = None quickchart_price_image = None ai_market_brief_text = None logger.exception("pro_features import failed")
 
 Scheduler (for auto-briefs)
 
