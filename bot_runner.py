@@ -68,7 +68,7 @@ if ensure_storage: try: ensure_storage() except Exception: logger.exception("ens
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML") _last_signal_time = {}  # dict mapping (symbol|interval) -> datetime of last auto-send _scanner_thread = None _scanner_stop_event = threading.Event()
 
------ helpers -----
+# ----- helpers -----
 
 def _append_brand(text: str) -> str: if BRAND_TAG.strip() not in text: return text + BRAND_TAG return text
 
@@ -96,7 +96,7 @@ def mark_signal_sent(symbol: str, interval: str): key = f"{symbol}|{interval}" _
 
 def compute_risk_and_size(entry: float, sl: float, balance: float, risk_percent: float): risk_amount = (balance * risk_percent) / 100.0 diff = None try: diff = abs(entry - sl) except Exception: diff = None if not diff or diff <= 1e-12: return round(risk_amount, 8), 0.0 pos_size = risk_amount / diff return round(risk_amount, 8), round(pos_size, 8)
 
------ signal generation integration -----
+# ----- signal generation integration -----
 
 def _safe_generate_signal(symbol: str, interval: str): """ Primary path: use analyze_pair_multi_timeframes() from market_providers to get a multi-TF analysis. If that fails, fallback to fetching klines and legacy signal_engine. Returns a standardized dict: { symbol, interval, signal, entry, sl, tp1, confidence, reasons } """ try: # 1) Try the multi-TF analyzer (best) if analyze_pair_multi_timeframes: try: res = analyze_pair_multi_timeframes( symbol, timeframes=[interval] + [tf for tf in SCAN_INTERVALS if tf != interval] ) if isinstance(res, dict) and not res.get("error"): combined = res.get("combined_signal", "HOLD") score = float(res.get("combined_score", 0.0))
 
