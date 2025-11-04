@@ -291,6 +291,30 @@ def fetch_klines_multi(symbol: str = "BTCUSDT", interval: str = "1h", limit: int
             r.raise_for_status()
             return _parse_ohlcv_list(r.json().get("data"))
 
+    import requests
+
+def get_realtime_data(symbol):
+    """Try multiple exchanges for real-time market data."""
+    urls = [
+        f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}",
+        f"https://api.bybit.com/v5/market/tickers?category=spot&symbol={symbol}",
+        f"https://www.okx.com/api/v5/market/ticker?instId={symbol}"
+    ]
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                if "lastPrice" in str(data):  # Binance
+                    return float(data["lastPrice"])
+                if "data" in data and len(data["data"]) > 0:  # OKX
+                    return float(data["data"][0]["last"])
+                if "result" in data and "list" in data["result"]:  # Bybit
+                    return float(data["result"]["list"][0]["lastPrice"])
+        except Exception:
+            continue
+    return None
+
     except Exception:
         logger.exception("fetch_klines_multi failed")
 
