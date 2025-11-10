@@ -517,7 +517,103 @@ def _safe_generate_signal(symbol: str, interval: str):
                         "reasons": list(dict.fromkeys(reasons)),
                     }
             except Exception:
-                logger.exception("analyze_pair_multi_timeframes failed; falling back")
+                
+# ----------------- Signal send callback -----------------
+def send_signal_to_telegram(signal: dict):
+    """
+    Sends a single strong signal to Telegram with AI button.
+    signal: {
+        'symbol': str,
+        'interval': str,
+        'signal': 'LONG'|'SHORT'|'HOLD',
+        'entry': float,
+        'sl': float,
+        'tp1': float,
+        'confidence': float,
+        'reasons': list,
+        'id': str,  # unique ID for this signal
+    }
+    """
+    chat_id = ADMIN_ID  # or a list of chat IDs
+
+    if not signal or signal.get("signal") == "HOLD":
+        return  # Skip weak signals
+
+    # Build message text
+    msg_lines = [
+        f"💹 *{signal['symbol']}* ({signal['interval']})",
+        f"Signal: *{signal['signal']}*",
+        f"Entry: {signal.get('entry')}",
+        f"SL: {signal.get('sl')}",
+        f"TP1: {signal.get('tp1')}",
+        f"Confidence: {signal.get('confidence'):.2f}",
+        f"Reasons: {', '.join(signal.get('reasons', []))}",
+    ]
+    msg_text = "\n".join(msg_lines)
+
+    # Inline keyboard for AI analysis
+    keyboard = types.InlineKeyboardMarkup()
+    ai_button = types.InlineKeyboardButton(
+        text="🤖 AI Analysis", callback_data=f"ai_{signal['id']}"
+    )
+    keyboard.add(ai_button)
+
+    bot.send_message(chat_id, _append_brand(msg_text), parse_mode="Markdown", reply_markup=keyboard)
+
+# ----------------- Start auto-scanner -----------------
+def start_real_time_scanner(pairs: list, interval: str = "1h", exchanges: list = None,
+                            min_confidence: float = 0.85, poll_seconds: int = 60, use_ai: bool = True):
+    """
+    Start the background scanner to fetch signals in real-time and push to Telegram.
+    """
+    def _scanner():
+        LOG.info("Real-time scanner started for pairs: %s", pairs)
+        while not _scanner_stop_evt.is_set():
+            try:
+                for symbol in pairs:
+                    signal = generate_signal_multi(
+                        symbol,
+                        interval,
+                        exchanges=exchanges or DEFAULT_EXCHANGES,
+                        min_confidence_for_signal=min_confidence,
+                        use_ai_explain=use_ai
+                    )
+                    if signal and signal.get("signal") in ("LONG", "SHORT") and signal.get("confidence", 0) >= min_confidence:
+                        # Add unique ID for AI callback
+                        if "id" not in signal:
+                            signal["id"] = f"{symbol}_{int(time.time())}"
+                        send_signal_to_telegram(signal)
+                # Sleep before next poll
+                for _ in range(poll_seconds):
+                    if _scanner_stop_evt.is_set():
+                        break
+                    time.sleep(1)
+            except Exception:
+                LOG.exception("Real-time scanner loop error, continuing...")
+
+    # Stop previous thread if running
+    stop_real_time_scanner()
+
+    _scanner_stop_evt.clear()
+    t = threading.Thread(target=_scanner, daemon=True)
+    t.start()
+    LOG.info("Real-time scanner thread started")
+    return t
+
+# ----------------- Stop auto-scanner -----------------
+def stop_real_time_scanner(timeout: int = 5):
+    """
+    Stop the real-time scanner thread.
+    """
+    global _scanner_thread
+    if _scanner_thread and _scanner_thread.is_alive():
+        _scanner_stop_evt.set()
+        _scanner_thread.join(timeout)
+        if _scanner_thread.is_alive():
+            LOG.warning("Scanner thread did not stop within timeout")
+        else:
+            LOG.info("Scanner stopped cleanly")
+        _scanner_thread = None
 
         # 2) Fallback: try to fetch klines for exchanges and run legacy generate_signal
         exchanges_to_try = ["binance", "bybit", "kucoin", "okx"]
@@ -1094,14 +1190,17 @@ def callback_handler(call):
             stop_background_scanner()
             return
 
-        # Scheduler-based auto briefs (text/AI summaries)
+            def callback_handler(call):
+    """Handle all Telegram inline button callbacks: scheduler, AI analysis, unknown actions."""
+    try:
+        data = call.data
+        cid = call.message.chat.id
+
+        # ---------------- Scheduler controls ----------------
         if data == "start_auto_brief_scheduler":
             if start_scheduler:
-                _send_branded(cid, "▶ Scheduler for auto-briefs enabled. You will receive periodic market briefs.", lines_for_image=["Scheduler enabled"])
-                try:
-                    start_scheduler(bot)
-                except Exception:
-                    logger.exception("start_scheduler failed")
+                start_scheduler()
+                _send_branded(cid, "▶ Scheduler for auto-briefs enabled.", lines_for_image=["Scheduler enabled"])
             else:
                 _send_branded(cid, "Scheduler not available (missing scheduler module).", lines_for_image=["Scheduler missing"])
             return
@@ -1114,37 +1213,50 @@ def callback_handler(call):
                 _send_branded(cid, "Scheduler not available (missing scheduler module).", lines_for_image=["Scheduler missing"])
             return
 
+        # ---------------- AI Analysis ----------------
         if data.startswith("ai_"):
             sig_id = data.split("_", 1)[1]
             d = load_data() if load_data else {}
-            rec = next((s for s in d.get("signals", []) if s["id"] == sig_id), None) if isinstance(d, dict) else None
+            rec = None
+            if isinstance(d, dict) and "signals" in d:
+                rec = next((s for s in d["signals"] if s["id"] == sig_id), None)
+
             if not rec:
                 _send_branded(cid, "Signal not found", lines_for_image=["Signal not found"])
                 return
-            prompt = f"Provide trade rationale, risk controls and a recommended leverage for this trade:\n{rec['signal']}"
-            ai_text = None
+
+            prompt = f"Provide trade rationale, risk controls, and recommended leverage for this trade:\n{rec['signal']}"
+            ai_text = "AI feature error"
+
             try:
+                # Use official AI client if available
                 if ai_analysis_text and callable(ai_analysis_text):
                     resp = ai_analysis_text(prompt)
+                    LOG.info("AI raw response: %s", resp)
                     if isinstance(resp, dict):
                         ai_text = resp.get("analysis") or str(resp)
                     else:
                         ai_text = str(resp)
                 else:
-                    ai_text = _local_ai_analysis(prompt).get("analysis")
+                    # fallback local AI
+                    ai_text = _local_ai_analysis(prompt).get("analysis") or "AI fallback: unable to generate response."
             except Exception:
-                ai_text = "AI feature error"
-            _send_branded(cid, f"🤖 AI analysis:\n{ai_text}", lines_for_image=(ai_text.splitlines()[:8] if ai_text else ["AI error"]))
+                LOG.exception("AI analysis failed")
+
+            # Limit lines for image
+            lines_image = ai_text.splitlines()[:8] if ai_text else ["AI error"]
+            _send_branded(cid, f"🤖 AI analysis:\n{ai_text}", lines_for_image=lines_image)
             return
 
+        # ---------------- Unknown actions ----------------
         bot.send_message(cid, _append_brand("Unknown action"))
+
     except Exception:
-        logger.exception("callback_handler failed")
+        LOG.exception("callback_handler failed")
         try:
             bot.answer_callback_query(call.id, "Handler error")
         except Exception:
             pass
-
 
 # If this file is executed directly allow a small self-test message (optional)
 def start_bot_polling():
