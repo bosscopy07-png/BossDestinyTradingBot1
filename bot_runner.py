@@ -1,4 +1,4 @@
-# bot_runner.py (production-ready)
+# bot_runner.py (production-ready, fully integrated)
 import os
 import time
 import threading
@@ -10,12 +10,10 @@ import telebot
 from telebot import types
 import json
 import re
-from io import BytesIO
 
 # ----- Branding and global constants -----
 BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot 💎</b>"
 
-# Config from env (with sane defaults)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 PAIRS = os.getenv(
@@ -28,7 +26,6 @@ SIGNAL_INTERVAL_DEFAULT = os.getenv("SIGNAL_INTERVAL", "1h")
 COOLDOWN_MIN = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1"))
 CHALLENGE_START = float(os.getenv("CHALLENGE_START", "100.0"))
-
 AUTO_CONFIDENCE_THRESHOLD = float(os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90"))
 AUTO_SEND_ONLY_ADMIN = os.getenv("AUTO_SEND_ONLY_ADMIN", "True").lower() in ("1", "true", "yes")
 
@@ -41,6 +38,7 @@ logger = logging.getLogger("bot_runner")
 
 # ----- Optional imports with graceful fallback -----
 try:
+    import market_providers
     from market_providers import (
         fetch_trending_pairs_branded,
         fetch_klines_multi,
@@ -63,6 +61,7 @@ except Exception:
     logger.exception("image_utils import failed")
 
 try:
+    import signal_engine
     from signal_engine import (
         generate_signal as legacy_generate_signal,
         generate_signal_multi,
@@ -77,30 +76,34 @@ except Exception:
     logger.exception("signal_engine import failed")
 
 try:
+    import storage
     from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
 except Exception:
     ensure_storage = load_data = save_data = record_pnl_screenshot = None
     logger.exception("storage import failed")
 
 try:
+    import ai_client
     from ai_client import ai_analysis_text
 except Exception:
     ai_analysis_text = None
     logger.exception("ai_client import failed")
 
 try:
+    import pro_features
     from pro_features import get_multi_exchange_snapshot
 except Exception:
     get_multi_exchange_snapshot = None
     logger.exception("pro_features import failed")
 
 try:
+    import scheduler
     from scheduler import start_scheduler, stop_scheduler
 except Exception:
     start_scheduler = stop_scheduler = None
     logger.exception("scheduler import failed")
 
-# ensure storage exists
+# Ensure storage exists
 if ensure_storage:
     try:
         ensure_storage()
@@ -120,6 +123,12 @@ def _append_brand(text: str) -> str:
     if BRAND_TAG.strip() not in text:
         return text + BRAND_TAG
     return text
+
+def send_message(chat_id, text):
+    try:
+        bot.send_message(chat_id, _append_brand(text))
+    except:
+        logger.exception(f"Failed to send message to {chat_id}")
 
 def _send_image_text_or_fallback(chat_id, text: str, title_lines=None, image_bytes=None, reply_markup=None):
     try:
@@ -277,7 +286,7 @@ def main_keyboard():
            types.InlineKeyboardButton("⛔ Stop Auto Briefs",callback_data="stop_auto_brief_scheduler"))
     return kb
 
-# ----- Telegram handlers -----
+# ----- Telegram Handlers -----
 @bot.message_handler(commands=["start","menu"])
 def cmd_start(msg):
     text="👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."
@@ -302,10 +311,125 @@ def photo_handler(message):
         bot.reply_to(message,_append_brand("Saved screenshot. Reply with `#link <signal_id> TP1` or `#link <signal_id> SL`"))
     except: logger.exception("photo_handler failed"); bot.reply_to(message,_append_brand("Failed to save screenshot."))
 
-# Callback handler and signal links are included in same way
-# ... [All callback query handlers remain exactly as in your original code with proper fixes] ...
+# ----- Callback Handler (Full) -----
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    chat_id = call.message.chat.id
+    data = call.data
+    logger.info(f"Callback received: {data} from {chat_id}")
+    try:
+        # ----- All actions combined -----
+        if data == "get_signal":
+            for pair in PAIRS:
+                sig = _safe_generate_signal(pair, SIGNAL_INTERVAL_DEFAULT)
+                if "error" in sig:
+                    send_message(chat_id, f"⚠️ Failed to generate signal for {pair}")
+                else:
+                    record_signal_and_send(sig, chat_id=chat_id, auto=False)
+            return
+        if data == "trending":
+            if market_providers and getattr(market_providers, "fetch_trending_pairs_text", None):
+                text = market_providers.fetch_trending_pairs_text(PAIRS)
+                send_message(chat_id, f"🚀 Trending Pairs:\n{text}")
+            else: send_message(chat_id, "⚠️ Trending pairs module unavailable")
+            return
+        if data == "scan_top4":
+            top_pairs = PAIRS[:4]
+            for pair in top_pairs:
+                sig = _safe_generate_signal(pair, SIGNAL_INTERVAL_DEFAULT)
+                record_signal_and_send(sig, chat_id=chat_id, auto=False)
+            return
+        if data == "bot_status":
+            status_text = "🟢 Bot is running" if _bot_polling_thread and _bot_polling_thread.is_alive() else "🔴 Bot is stopped"
+            send_message(chat_id, status_text)
+            return
+            
+        # -----------------
+        # AI Market Brief
+        # -----------------
+        if data == "ask_ai":
+            if ai_client and getattr(ai_client, "ai_analysis_text", None):
+                prompt = f"Generate market brief for {', '.join(PAIRS)}."
+                analysis = ai_client.ai_analysis_text(prompt)
+                send_message(chat_id, f"🤖 AI Market Brief:\n{analysis}")
+            else:
+                send_message(chat_id, "⚠️ AI client unavailable")
+            return
 
-# ----- Polling control -----
+        # -----------------
+        # PnL Upload / Link
+        # -----------------
+        if data.startswith("link_"):
+            sig_id = data.split("_", 1)[1]
+            send_message(chat_id, f"🔗 Link PnL for signal {sig_id} by replying to me with `#link {sig_id} TP1` or `#link {sig_id} SL`")
+            return
+
+        if data == "pnl_upload":
+            send_message(chat_id, "📷 Upload your PnL screenshot by sending a photo to this chat")
+            return
+
+        # -----------------
+        # History
+        # -----------------
+        if data == "history":
+            d = storage.load_data() if storage and getattr(storage, "load_data", None) else {}
+            signals = d.get("signals", []) if isinstance(d, dict) else []
+            text = "\n".join([f"{s['signal']['symbol']} | {s['signal']['signal']} | {s['time']}" for s in signals[-10:]]) or "No history yet"
+            send_message(chat_id, f"📋 Last 10 signals:\n{text}")
+            return
+
+        # -----------------
+        # Auto Scanner
+        # -----------------
+        if data == "start_auto_brief":
+            if signal_engine and getattr(signal_engine, "start_auto_scanner", None):
+                signal_engine.start_auto_scanner(bot, PAIRS, SIGNAL_INTERVAL_DEFAULT)
+                send_message(chat_id, "▶ Auto Scanner Started")
+            else:
+                send_message(chat_id, "⚠️ Auto scanner unavailable")
+            return
+
+        if data == "stop_auto_brief":
+            if signal_engine and getattr(signal_engine, "stop_auto_scanner", None):
+                signal_engine.stop_auto_scanner()
+                send_message(chat_id, "⏹ Auto Scanner Stopped")
+            else:
+                send_message(chat_id, "⚠️ Auto scanner unavailable")
+            return
+
+        # -----------------
+        # Scheduler for Auto Briefs
+        # -----------------
+        if data == "start_auto_brief_scheduler":
+            if scheduler and getattr(scheduler, "start_scheduler", None):
+                scheduler.start_scheduler(bot, PAIRS)
+                send_message(chat_id, "📣 Auto Brief Scheduler Started")
+            else:
+                send_message(chat_id, "⚠️ Scheduler unavailable")
+            return
+
+        if data == "stop_auto_brief_scheduler":
+            if scheduler and getattr(scheduler, "stop_scheduler", None):
+                scheduler.stop_scheduler()
+                send_message(chat_id, "⛔ Auto Brief Scheduler Stopped")
+            else:
+                send_message(chat_id, "⚠️ Scheduler unavailable")
+            return
+
+        # -----------------
+        # Refresh Bot
+        # -----------------
+        if data == "refresh_bot":
+            send_message(chat_id, "🔄 Refreshing bot...")
+            stop_bot_polling()
+            start_bot_polling()
+            send_message(chat_id, "✅ Bot refreshed")
+            return
+
+    except Exception:
+        logger.exception(f"Callback {data} failed")
+        send_message(chat_id, "⚠️ An error occurred while processing your request")
+
 def start_bot_polling(non_stop=True, skip_pending=True):
     global _bot_polling_thread
     if _bot_polling_thread and _bot_polling_thread.is_alive(): return True
@@ -325,3 +449,6 @@ def stop_bot_polling():
 
 if __name__=="__main__":
     logger.info("bot_runner loaded. Ready.")
+    stop_existing_bot_instances()
+    start_bot_polling()
+    
