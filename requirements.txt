@@ -1,22 +1,19 @@
 # Destiny Trading Empire Bot - Python Dependencies
 # Core framework: pyTelegramBotAPI (telebot)
-# Last updated: 2024
+# Last updated: 2025-03-04
 
 # ----- Telegram Bot -----
 # Main bot framework - using pyTelegramBotAPI (telebot wrapper)
 pyTelegramBotAPI==4.23.0
 
-# Alternative: python-telegram-bot (not used but listed for reference)
-# python-telegram-bot==21.5
-
 # ----- Web Framework (for webhooks/health checks) -----
 Flask==3.0.3
-Werkzeug==3.0.3  # Flask dependency with security fixes
+Werkzeug==3.0.3
 
 # ----- HTTP & Networking -----
 requests==2.32.3
 urllib3==2.2.2
-certifi>=2024.7.4  # SSL certificates
+certifi>=2024.7.4
 
 # ----- Data Processing -----
 pandas==2.2.2
@@ -29,30 +26,31 @@ Pillow==10.4.0
 matplotlib==3.9.0
 
 # ----- Crypto/Trading APIs -----
-ccxt==4.3.74  # Multi-exchange trading API
+ccxt==4.3.74
 
 # ----- AI/ML -----
-openai==1.37.0  # OpenAI API client
+# Latest OpenAI SDK (v2.x) - major rewrite with new client interface
+openai==2.24.0
 
 # ----- Environment Management -----
 python-dotenv==1.0.1
 
 # ----- Optional: Async Support -----
-# aiohttp==3.9.5  # Uncomment if needed for async features
+# aiohttp==3.9.5
 # aiosignal==1.3.1
 
 # ----- Optional: Database -----
-# SQLAlchemy==2.0.31  # Uncomment for database features
-# psycopg2-binary==2.9.9  # PostgreSQL support
+# SQLAlchemy==2.0.31
+# psycopg2-binary==2.9.9
 
 # ----- Optional: Caching -----
-# redis==5.0.7  # Uncomment for Redis caching
+# redis==5.0.7
 
 # ----- Development/Testing -----
-# pytest==8.3.2  # Uncomment for testing
+# pytest==8.3.2
 # pytest-asyncio==0.23.8
-# black==24.4.2  # Code formatting
-# flake8==7.1.0  # Linting
+# black==24.4.2
+# flake8==7.1.0
 
-# ----- Production Server (for deployments) -----
-# gunicorn==23.0.0  # Uncomment for production WSGI server
+# ----- Production Server -----
+# gunicorn==23.0.0
