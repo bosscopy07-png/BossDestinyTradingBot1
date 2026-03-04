@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: destiny-trading-bot
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python render_app.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PORT
+        value: 10000
+    healthCheckPath: /health
+    autoDeploy: true
+    
