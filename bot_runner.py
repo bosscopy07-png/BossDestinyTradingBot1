@@ -1,399 +1,450 @@
-# bot_runner.py
-# Destiny Trading Empire Signal Bot - Production-ready version (improved 2025)
-
+# bot_runner.py (production-ready, orchestration layer only)
 import os
-import sys
 import time
 import threading
 import logging
-import signal
-from datetime import datetime, timedelta
-from collections import defaultdict
-import json
-import re
+from datetime import datetime
 
 import telebot
 from telebot import types
 
-# ────────────────────────────────────────
-#  Environment & Constants
-# ────────────────────────────────────────
-
+# ----- Configuration -----
 BRAND_TAG = "\n\n— <b>Destiny Trading Empire Bot 💎</b>"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN environment variable is required")
-
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-ADMIN_IDS = {ADMIN_ID}  # can become list/set later
-
-PAIRS = [
-    p.strip().upper()
-    for p in os.getenv(
-        "PAIRS", "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,MATICUSDT,ADAUSDT"
-    ).split(",")
-    if p.strip()
-]
+PAIRS = os.getenv(
+    "PAIRS",
+    "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,MATICUSDT,ADAUSDT",
+).split(",")
 
 SIGNAL_INTERVAL_DEFAULT = os.getenv("SIGNAL_INTERVAL", "1h")
-COOLDOWN_MINUTES      = int(os.getenv("SIGNAL_COOLDOWN_MIN", "30"))
-RISK_PERCENT          = float(os.getenv("RISK_PERCENT", "1.0"))
-CHALLENGE_START       = float(os.getenv("CHALLENGE_START", "100.0"))
-AUTO_CONFIDENCE_THRESHOLD = float(os.getenv("AUTO_CONFIDENCE_THRESHOLD", "0.90"))
+AUTO_SEND_ONLY_ADMIN = os.getenv("AUTO_SEND_ONLY_ADMIN", "True").lower() in ("1", "true", "yes")
 
-AUTO_PUBLISH_ONLY_TO_ADMIN = os.getenv("AUTO_SEND_ONLY_ADMIN", "true").lower() in (
-    "true", "1", "yes", "on"
-)
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable required")
 
-# ────────────────────────────────────────
-# Logging
-# ────────────────────────────────────────
-
+# ----- Logging -----
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(name)s  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+    format="%(asctime)s [%(levelname)s] %(message)s"
 )
-logger = logging.getLogger("destiny-bot")
+logger = logging.getLogger("bot_runner")
 
-# ────────────────────────────────────────
-# Lazy / Optional module imports
-# ────────────────────────────────────────
-
-market_providers = None
-fetch_trending_pairs_text = fetch_klines_multi = analyze_pair_multi_timeframes = None
-generate_branded_signal_image = None
-
-signal_engine = None
-se_start_auto_scanner = se_stop_auto_scanner = None
-
-storage = None
-load_data = save_data = ensure_storage = record_pnl_screenshot = None
-
-ai_client = None
-ai_analysis_text = None
-
-image_utils = None
-create_brand_image = safe_send_with_image = quickchart_image_bytes = None
-
-scheduler = None
-start_scheduler = stop_scheduler = None
-
-try:
-    import market_providers
-    from market_providers import (
-        fetch_trending_pairs_text, fetch_klines_multi,
-        analyze_pair_multi_timeframes, generate_branded_signal_image
-    )
-except Exception:
-    logger.exception("market_providers import failed")
-
+# ----- Import Services (thin layer) -----
+# These modules handle their own logic; bot_runner just orchestrates
 try:
     import signal_engine
-    from signal_engine import start_auto_scanner, stop_auto_scanner
-except Exception:
-    logger.exception("signal_engine import failed")
+    from signal_engine import (
+        generate_and_send_signal,
+        start_auto_scanner,
+        stop_auto_scanner,
+    )
+except Exception as e:
+    signal_engine = None
+    generate_and_send_signal = None
+    start_auto_scanner = None
+    stop_auto_scanner = None
+    logger.warning(f"signal_engine unavailable: {e}")
 
 try:
     import storage
-    from storage import ensure_storage, load_data, save_data, record_pnl_screenshot
-except Exception:
-    logger.exception("storage import failed")
+    from storage import record_pnl_screenshot, get_signal_history
+except Exception as e:
+    storage = None
+    record_pnl_screenshot = None
+    get_signal_history = None
+    logger.warning(f"storage unavailable: {e}")
 
 try:
     import ai_client
-    from ai_client import ai_analysis_text
-except Exception:
-    logger.exception("ai_client import failed")
+    from ai_client import get_market_brief
+except Exception as e:
+    ai_client = None
+    get_market_brief = None
+    logger.warning(f"ai_client unavailable: {e}")
 
 try:
-    import image_utils
-    from image_utils import create_brand_image, safe_send_with_image, quickchart_image_bytes
-except Exception:
-    logger.exception("image_utils import failed")
+    import market_providers
+    from market_providers import get_trending_pairs_text
+except Exception as e:
+    market_providers = None
+    get_trending_pairs_text = None
+    logger.warning(f"market_providers unavailable: {e}")
 
 try:
     import scheduler
     from scheduler import start_scheduler, stop_scheduler
-except Exception:
-    logger.exception("scheduler import failed")
+except Exception as e:
+    scheduler = None
+    start_scheduler = None
+    stop_scheduler = None
+    logger.warning(f"scheduler unavailable: {e}")
 
-# Ensure storage folder / files
-if ensure_storage:
-    try:
-        ensure_storage()
-    except Exception:
-        logger.exception("ensure_storage failed")
+try:
+    from image_utils import create_welcome_image, send_image_or_text
+except Exception as e:
+    create_welcome_image = None
+    send_image_or_text = None
+    logger.warning(f"image_utils unavailable: {e}")
 
-# ────────────────────────────────────────
-# Bot instance
-# ────────────────────────────────────────
-
+# ----- Bot State -----
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
-
-# ────────────────────────────────────────
-# Global runtime state
-# ────────────────────────────────────────
-
-_last_signal_time = {}                    # "SYMBOL|TF" → datetime
-_last_callback_time = defaultdict(lambda: datetime(2000,1,1))
-_scanner_thread = None
 _bot_polling_thread = None
+_polling_stop_event = threading.Event()
 
-# ────────────────────────────────────────
-# Helpers
-# ────────────────────────────────────────
+# ----- Core Helpers -----
+def _append_brand(text: str) -> str:
+    """Append brand tag if not present."""
+    if BRAND_TAG.strip() not in text:
+        return text + BRAND_TAG
+    return text
 
-def append_brand(text: str) -> str:
-    return text if BRAND_TAG.strip() in text else text + BRAND_TAG
-
-
-def send_message(chat_id: int, text: str, **kwargs):
+def send_plain_message(chat_id: int, text: str) -> None:
+    """Send simple text message with branding."""
     try:
-        bot.send_message(chat_id, append_brand(text), **kwargs)
+        bot.send_message(chat_id, _append_brand(text))
     except Exception:
-        logger.exception(f"send_message failed to {chat_id}")
+        logger.exception(f"Failed to send message to {chat_id}")
 
+def send_rich_message(chat_id: int, text: str, image_bytes=None, reply_markup=None) -> None:
+    """Send message with image fallback."""
+    try:
+        if image_bytes and send_image_or_text:
+            send_image_or_text(bot, chat_id, _append_brand(text), image_bytes, reply_markup)
+        else:
+            bot.send_message(chat_id, _append_brand(text), reply_markup=reply_markup)
+    except Exception:
+        logger.exception("Failed to send rich message")
+        # Fallback to plain text
+        try:
+            bot.send_message(chat_id, _append_brand(text), reply_markup=reply_markup)
+        except Exception:
+            logger.exception("Fallback message failed")
 
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-def rate_limit_ok(call) -> bool:
-    now = datetime.utcnow()
-    key = f"{call.from_user.id}:{call.data}"
-    if (now - _last_callback_time[key]).total_seconds() < 1.4:
-        bot.answer_callback_query(call.id, "⏳ Please wait...", show_alert=False)
-        return False
-    _last_callback_time[key] = now
-    return True
-
-
-def module_available(name: str, obj) -> bool:
-    if obj is None:
-        logger.warning(f"Feature unavailable: {name}")
-        return False
-    return True
-
-
-def can_send_signal(symbol: str, interval: str) -> bool:
-    key = f"{symbol.upper()}|{interval}"
-    last = _last_signal_time.get(key)
-    if last is None:
-        return True
-    return (datetime.utcnow() - last).total_seconds() > COOLDOWN_MINUTES * 60
-
-
-def mark_signal_sent(symbol: str, interval: str):
-    key = f"{symbol.upper()}|{interval}"
-    _last_signal_time[key] = datetime.utcnow()
-
-
-def should_auto_publish(sig: dict) -> bool:
-    if sig.get("signal", "HOLD") == "HOLD":
-        return False
-    if sig.get("confidence", 0) < AUTO_CONFIDENCE_THRESHOLD:
-        return False
-    if AUTO_PUBLISH_ONLY_TO_ADMIN:
-        return False  # for now — can be extended later with user context
-    return can_send_signal(sig["symbol"], sig["interval"])
-
-
-# ────────────────────────────────────────
-# Main menu keyboard
-# ────────────────────────────────────────
-
+# ----- Keyboard Factory -----
 def main_keyboard():
+    """Create main control panel keyboard."""
     kb = types.InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        ("📈 Get Signals",           "get_signal"),
-        ("🔎 Scan Top 4",            "scan_top4"),
-        ("🚀 Trending Pairs",        "trending"),
-        ("⚙️ Bot Status",           "bot_status"),
-        ("📰 Market News",          "market_news"),
-        ("📃 My Challenge",          "challenge_status"),
-        ("📷 Upload PnL",            "pnl_upload"),
-        ("📋 History",               "history"),
-        ("🤖 AI Market Brief",       "ask_ai"),
-        ("🔄 Refresh Bot",           "refresh_bot"),
-        ("▶ Start Auto Scanner",     "start_auto_scanner"),
-        ("⏹ Stop Auto Scanner",      "stop_auto_scanner"),
-    ]
-    for text, cb in buttons:
-        kb.add(types.InlineKeyboardButton(text, callback_data=cb))
+    kb.add(
+        types.InlineKeyboardButton("📈 Get Signals", callback_data="get_signal"),
+        types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4")
+    )
+    kb.add(
+        types.InlineKeyboardButton("⚙️ Bot Status", callback_data="bot_status"),
+        types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📰 Market News", callback_data="market_news"),
+        types.InlineKeyboardButton("📃 My Challenge", callback_data="challenge_status")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📷 Upload PnL", callback_data="pnl_upload"),
+        types.InlineKeyboardButton("📋 History", callback_data="history")
+    )
+    kb.add(
+        types.InlineKeyboardButton("🤖 AI Market Brief", callback_data="ask_ai"),
+        types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot")
+    )
+    kb.add(
+        types.InlineKeyboardButton("▶ Start Auto Scanner", callback_data="start_auto"),
+        types.InlineKeyboardButton("⏹ Stop Auto Scanner", callback_data="stop_auto")
+    )
+    kb.add(
+        types.InlineKeyboardButton("📣 Start Auto Briefs", callback_data="start_scheduler"),
+        types.InlineKeyboardButton("⛔ Stop Auto Briefs", callback_data="stop_scheduler")
+    )
     return kb
 
-
-# ────────────────────────────────────────
-# Command handlers
-# ────────────────────────────────────────
-
+# ----- Command Handlers -----
 @bot.message_handler(commands=["start", "menu"])
-def cmd_start(message):
-    text = "👋 Welcome Boss Destiny!\n\nControl panel for signals, scanners & market intel."
-    try:
-        if module_available("image_utils - create_brand_image", create_brand_image):
-            img = create_brand_image(
-                ["Destiny Trading Empire", "Signal & Automation Bot"],
-                title="Destiny Trading Empire Bot 💎"
-            )
-            if module_available("image_utils - safe_send", safe_send_with_image):
-                safe_send_with_image(bot, message.chat.id, append_brand(text), img, reply_markup=main_keyboard())
-                return
-            bot.send_photo(message.chat.id, img, caption=append_brand(text), reply_markup=main_keyboard())
-            return
-    except Exception:
-        logger.exception("welcome image creation failed")
-    bot.send_message(message.chat.id, append_brand(text), reply_markup=main_keyboard())
-
-
-@bot.message_handler(commands=["help"])
-def cmd_help(message):
-    text = (
-        "<b>Commands & features</b>\n\n"
-        "/start /menu   — main menu\n"
-        "/help           — this message\n"
-        "/status         — bot & scanner status\n\n"
-        "<b>Main actions via buttons:</b>\n"
-        "• Get Signals\n"
-        "• Scan Top 4 pairs\n"
-        "• Trending pairs\n"
-        "• Auto scanner start/stop\n"
-        "• Upload PnL screenshots\n"
-        "• View signal history\n"
-        "• AI market brief\n"
-    )
-    send_message(message.chat.id, text)
-
-
-@bot.message_handler(commands=["status"])
-def cmd_status(message):
-    scanner_alive = _scanner_thread is not None and _scanner_thread.is_alive()
+def cmd_start(msg):
+    """Handle /start and /menu commands."""
+    text = "👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."
     lines = [
-        f"Bot polling   : {'🟢 running' if _bot_polling_thread and _bot_polling_thread.is_alive() else '🔴 stopped'}",
-        f"Auto scanner  : {'🟢 running' if scanner_alive else '⏹ stopped'}",
-        f"Pairs watched : {len(PAIRS)}",
-        f"Default TF    : {SIGNAL_INTERVAL_DEFAULT}",
-        f"Cooldown      : {COOLDOWN_MINUTES} min",
-        f"Risk / trade  : {RISK_PERCENT}%",
-        f"Auto threshold: {AUTO_CONFIDENCE_THRESHOLD:.0%}",
-        f"Auto only admin: {'yes' if AUTO_PUBLISH_ONLY_TO_ADMIN else 'no'}",
+        "Welcome — Destiny Trading Empire Bot 💎",
+        "Use the buttons to get signals, start scanners, view trending pairs."
     ]
-    if module_available("storage", load_data):
+    
+    # Try to send branded image welcome
+    if create_welcome_image:
         try:
-            d = load_data() or {}
-            bal = d.get("challenge", {}).get("balance", CHALLENGE_START)
-            lines.append(f"Challenge bal : ${bal:,.2f}")
-        except:
-            pass
-    send_message(message.chat.id, "\n".join(lines))
-
-
-# ────────────────────────────────────────
-# Placeholder for the big callback handler
-# (you can keep expanding this part)
-# ────────────────────────────────────────
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_router(call):
-    if not rate_limit_ok(call):
-        return
-
-    chat_id = call.message.chat.id
-    user_id = call.from_user.id
-    data = call.data
-
-    logger.info(f"Callback  {data:24}  user={user_id:10}  chat={chat_id}")
-
-    if data in {"start_auto_scanner", "stop_auto_scanner", "refresh_bot"} and not is_admin(user_id):
-        bot.answer_callback_query(call.id, "🔒 Admin only", show_alert=True)
-        return
-
-    # ── Add your existing callback logic here ───────────────────────
-    # For now just a few examples:
-
-    if data == "bot_status":
-        cmd_status(call.message)   # reuse command logic
-        bot.answer_callback_query(call.id, "Status checked")
-
-    elif data == "trending":
-        if module_available("market_providers", fetch_trending_pairs_text):
-            text = fetch_trending_pairs_text(PAIRS)
-            send_message(chat_id, f"<b>Trending pairs:</b>\n{text}")
-        else:
-            send_message(chat_id, "Trending module not available")
-        bot.answer_callback_query(call.id)
-
-    # ... add get_signal, scan_top4, ask_ai, history, etc.
-
-    else:
-        send_message(chat_id, "Action not implemented yet")
-        bot.answer_callback_query(call.id, "🚧 Under construction")
-
-
-# ────────────────────────────────────────
-# Graceful shutdown
-# ────────────────────────────────────────
-
-def shutdown_handler(signum=None, frame=None):
-    logger.info("Shutdown signal received...")
-    try:
-        if module_available("signal_engine", se_stop_auto_scanner):
-            se_stop_auto_scanner()
-        if module_available("scheduler", stop_scheduler):
-            stop_scheduler()
-        bot.stop_polling()
-    except Exception:
-        logger.exception("Cleanup during shutdown failed")
-    finally:
-        logger.info("Bot shutdown complete.")
-        sys.exit(0)
-
-
-signal.signal(signal.SIGINT, shutdown_handler)
-signal.signal(signal.SIGTERM, shutdown_handler)
-
-
-# ────────────────────────────────────────
-# Polling control
-# ────────────────────────────────────────
-
-def start_polling():
-    global _bot_polling_thread
-    if _bot_polling_thread and _bot_polling_thread.is_alive():
-        return
-    def poll():
-        try:
-            bot.infinity_polling(timeout=65, long_polling_timeout=65)
+            img = create_welcome_image(lines, title="Destiny Trading Empire Bot 💎")
+            send_rich_message(msg.chat.id, text, img, main_keyboard())
+            return
         except Exception:
-            logger.exception("Polling loop crashed")
-    _bot_polling_thread = threading.Thread(target=poll, daemon=True, name="TgPolling")
+            logger.exception("Welcome image failed, falling back to text")
+    
+    send_plain_message(msg.chat.id, text)
+
+@bot.message_handler(content_types=["photo"])
+def photo_handler(message):
+    """Handle PnL screenshot uploads."""
+    try:
+        # Download photo
+        file_info = bot.get_file(message.photo[-1].file_id)
+        image_data = bot.download_file(file_info.file_path)
+        
+        # Store via storage module
+        if record_pnl_screenshot:
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            record_pnl_screenshot(
+                image_data, 
+                timestamp, 
+                message.from_user.id, 
+                message.caption
+            )
+            bot.reply_to(
+                message, 
+                _append_brand("✅ Screenshot saved. Reply with `#link <signal_id> TP1` or `#link <signal_id> SL`")
+            )
+        else:
+            bot.reply_to(message, _append_brand("⚠️ Storage unavailable"))
+            
+    except Exception:
+        logger.exception("Photo handler failed")
+        bot.reply_to(message, _append_brand("❌ Failed to save screenshot"))
+
+# ----- Callback Router -----
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    """Route all callback queries to appropriate handlers."""
+    chat_id = call.message.chat.id
+    data = call.data
+    logger.info(f"Callback: {data} from {chat_id}")
+    
+    try:
+        # Route to specific handler based on action prefix
+        if data == "get_signal":
+            _handle_get_signal(chat_id)
+        elif data == "scan_top4":
+            _handle_scan_top4(chat_id)
+        elif data == "trending":
+            _handle_trending(chat_id)
+        elif data == "bot_status":
+            _handle_bot_status(chat_id)
+        elif data == "ask_ai":
+            _handle_ai_brief(chat_id)
+        elif data == "history":
+            _handle_history(chat_id)
+        elif data == "pnl_upload":
+            _handle_pnl_upload(chat_id)
+        elif data == "start_auto":
+            _handle_start_auto(chat_id)
+        elif data == "stop_auto":
+            _handle_stop_auto(chat_id)
+        elif data == "start_scheduler":
+            _handle_start_scheduler(chat_id)
+        elif data == "stop_scheduler":
+            _handle_stop_scheduler(chat_id)
+        elif data == "refresh_bot":
+            _handle_refresh(chat_id)
+        elif data.startswith("link_"):
+            _handle_link_pnl(chat_id, data)
+        else:
+            send_plain_message(chat_id, "⚠️ Unknown command")
+            
+    except Exception:
+        logger.exception(f"Callback handler failed for {data}")
+        send_plain_message(chat_id, "⚠️ An error occurred")
+
+# ----- Callback Action Handlers -----
+def _handle_get_signal(chat_id: int):
+    """Generate signals for all pairs."""
+    if not generate_and_send_signal:
+        send_plain_message(chat_id, "⚠️ Signal engine unavailable")
+        return
+    
+    for pair in PAIRS:
+        try:
+            generate_and_send_signal(bot, pair, SIGNAL_INTERVAL_DEFAULT, chat_id)
+        except Exception:
+            logger.exception(f"Signal generation failed for {pair}")
+            send_plain_message(chat_id, f"⚠️ Failed to generate signal for {pair}")
+
+def _handle_scan_top4(chat_id: int):
+    """Scan top 4 pairs only."""
+    if not generate_and_send_signal:
+        send_plain_message(chat_id, "⚠️ Signal engine unavailable")
+        return
+    
+    for pair in PAIRS[:4]:
+        try:
+            generate_and_send_signal(bot, pair, SIGNAL_INTERVAL_DEFAULT, chat_id)
+        except Exception:
+            logger.exception(f"Scan failed for {pair}")
+
+def _handle_trending(chat_id: int):
+    """Show trending pairs."""
+    if get_trending_pairs_text:
+        text = get_trending_pairs_text(PAIRS)
+        send_plain_message(chat_id, f"🚀 Trending Pairs:\n{text}")
+    else:
+        send_plain_message(chat_id, "⚠️ Trending data unavailable")
+
+def _handle_bot_status(chat_id: int):
+    """Check bot health."""
+    polling_ok = _bot_polling_thread and _bot_polling_thread.is_alive()
+    status = "🟢 Running" if polling_ok else "🔴 Stopped"
+    send_plain_message(chat_id, f"Bot Status: {status}")
+
+def _handle_ai_brief(chat_id: int):
+    """Generate AI market analysis."""
+    if not get_market_brief:
+        send_plain_message(chat_id, "⚠️ AI service unavailable")
+        return
+    
+    try:
+        brief = get_market_brief(PAIRS)
+        send_plain_message(chat_id, f"🤖 AI Market Brief:\n{brief}")
+    except Exception:
+        logger.exception("AI brief failed")
+        send_plain_message(chat_id, "⚠️ Failed to generate brief")
+
+def _handle_history(chat_id: int):
+    """Show signal history."""
+    if not get_signal_history:
+        send_plain_message(chat_id, "⚠️ History unavailable")
+        return
+    
+    try:
+        signals = get_signal_history(limit=10)
+        if signals:
+            text = "\n".join([
+                f"{s['symbol']} | {s['signal']} | {s['time']}" 
+                for s in signals
+            ])
+        else:
+            text = "No signals yet"
+        send_plain_message(chat_id, f"📋 Last 10 Signals:\n{text}")
+    except Exception:
+        logger.exception("History fetch failed")
+        send_plain_message(chat_id, "⚠️ Failed to load history")
+
+def _handle_pnl_upload(chat_id: int):
+    """Prompt for PnL upload."""
+    send_plain_message(chat_id, "📷 Send me a photo of your PnL screenshot")
+
+def _handle_start_auto(chat_id: int):
+    """Start auto scanner."""
+    if not start_auto_scanner:
+        send_plain_message(chat_id, "⚠️ Auto scanner unavailable")
+        return
+    
+    try:
+        start_auto_scanner(bot, PAIRS, SIGNAL_INTERVAL_DEFAULT)
+        send_plain_message(chat_id, "▶ Auto Scanner Started")
+    except Exception:
+        logger.exception("Auto scanner start failed")
+        send_plain_message(chat_id, "⚠️ Failed to start scanner")
+
+def _handle_stop_auto(chat_id: int):
+    """Stop auto scanner."""
+    if not stop_auto_scanner:
+        send_plain_message(chat_id, "⚠️ Auto scanner unavailable")
+        return
+    
+    try:
+        stop_auto_scanner()
+        send_plain_message(chat_id, "⏹ Auto Scanner Stopped")
+    except Exception:
+        logger.exception("Auto scanner stop failed")
+
+def _handle_start_scheduler(chat_id: int):
+    """Start scheduled briefs."""
+    if not start_scheduler:
+        send_plain_message(chat_id, "⚠️ Scheduler unavailable")
+        return
+    
+    try:
+        start_scheduler(bot, PAIRS)
+        send_plain_message(chat_id, "📣 Auto Brief Scheduler Started")
+    except Exception:
+        logger.exception("Scheduler start failed")
+
+def _handle_stop_scheduler(chat_id: int):
+    """Stop scheduled briefs."""
+    if not stop_scheduler:
+        send_plain_message(chat_id, "⚠️ Scheduler unavailable")
+        return
+    
+    try:
+        stop_scheduler()
+        send_plain_message(chat_id, "⛔ Auto Brief Scheduler Stopped")
+    except Exception:
+        logger.exception("Scheduler stop failed")
+
+def _handle_refresh(chat_id: int):
+    """Restart bot polling."""
+    send_plain_message(chat_id, "🔄 Refreshing...")
+    stop_bot_polling()
+    time.sleep(1)
+    start_bot_polling()
+    send_plain_message(chat_id, "✅ Bot refreshed")
+
+def _handle_link_pnl(chat_id: int, data: str):
+    """Handle PnL linking callback."""
+    sig_id = data.split("_", 1)[1]
+    msg = f"🔗 Link PnL for signal `{sig_id}`\nReply with: `#link {sig_id} TP1` or `#link {sig_id} SL`"
+    send_plain_message(chat_id, msg)
+
+# ----- Lifecycle Management -----
+def start_bot_polling():
+    """Start bot polling in daemon thread."""
+    global _bot_polling_thread
+    
+    if _bot_polling_thread and _bot_polling_thread.is_alive():
+        logger.info("Polling already active")
+        return True
+    
+    _polling_stop_event.clear()
+    
+    def _poll_loop():
+        try:
+            bot.infinity_polling(
+                timeout=60,
+                long_polling_timeout=60,
+                none_stop=True
+            )
+        except Exception:
+            logger.exception("Polling loop terminated")
+    
+    _bot_polling_thread = threading.Thread(target=_poll_loop, daemon=True)
     _bot_polling_thread.start()
+    logger.info("Bot polling started")
+    return True
 
-
-def stop_polling():
+def stop_bot_polling():
+    """Stop bot polling gracefully."""
     try:
         bot.stop_polling()
+        logger.info("Bot polling stopped")
     except Exception:
-        logger.exception("stop_polling failed")
+        logger.exception("Stop polling error")
 
-
-# ────────────────────────────────────────
-# Entry point
-# ────────────────────────────────────────
-
-if __name__ == "__main__":
-    logger.info("Destiny Trading Empire Bot starting...")
+def clear_pending_updates():
+    """Clear old updates to prevent flood on restart."""
     try:
-        stop_polling()          # clear stuck sessions if any
-        time.sleep(0.4)
-        start_polling()
-        logger.info("Bot polling started")
+        import requests
+        requests.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates?offset=-1",
+            timeout=5
+        )
+        logger.info("Cleared pending updates")
+    except Exception as e:
+        logger.warning(f"Could not clear updates: {e}")
+
+# ----- Entry Point -----
+if __name__ == "__main__":
+    logger.info("=== Destiny Trading Empire Bot Starting ===")
+    clear_pending_updates()
+    start_bot_polling()
+    
+    # Keep main thread alive
+    try:
         while True:
-            time.sleep(3600)    # keep main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
-        shutdown_handler()
-    except Exception:
-        logger.critical("Main loop crashed", exc_info=True)
-        shutdown_handler()
+        logger.info("Shutdown requested")
+        stop_bot_polling()
+        
