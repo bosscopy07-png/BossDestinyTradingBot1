@@ -148,28 +148,47 @@ def main_keyboard():
     return kb
     
 
-
 # ----- Command Handlers -----
 @bot.message_handler(commands=["start", "menu"])
 def cmd_start(msg):
     """Handle /start and /menu commands."""
     text = "👋 Welcome Boss Destiny!\n\nThis is your Trading Empire control panel."
-    lines = [
-        "Welcome — Destiny Trading Empire Bot 💎",
-        "Use the buttons to get signals, start scanners, view trending pairs."
-    ]
     
-    # Try to send branded image welcome
-    if create_welcome_image:
-        try:
-            img = create_welcome_image(lines, title="Destiny Trading Empire Bot 💎")
-            send_rich_message(msg.chat.id, text, img, main_keyboard())
-            return
-        except Exception:
-            logger.exception("Welcome image failed, falling back to text")
+    # Create the keyboard
+    keyboard = main_keyboard()  # <-- You need to call the function!
     
-    send_plain_message(msg.chat.id, text)
-
+    try:
+        # Try to send with branded image first
+        from image_utils import create_welcome_image, safe_send_with_image
+        
+        lines = [
+            "Welcome — Destiny Trading Empire Bot 💎",
+            "Use the buttons to get signals, start scanners, view trending pairs."
+        ]
+        
+        img = create_welcome_image(lines, title="Destiny Trading Empire Bot 💎")
+        
+        # THIS IS THE KEY PART - pass the keyboard!
+        safe_send_with_image(
+            bot, 
+            msg.chat.id, 
+            text, 
+            img, 
+            reply_markup=keyboard  # <-- Keyboard passed here!
+        )
+        
+    except Exception as e:
+        # Fallback to plain text with keyboard
+        logger.exception("Welcome image failed, sending text only")
+        
+        # THIS IS THE KEY PART - pass the keyboard!
+        bot.send_message(
+            msg.chat.id,
+            _append_brand(text),
+            reply_markup=keyboard,  # <-- Keyboard passed here!
+            parse_mode="HTML"
+        )
+        
 @bot.message_handler(content_types=["photo"])
 def photo_handler(message):
     """Handle PnL screenshot uploads."""
