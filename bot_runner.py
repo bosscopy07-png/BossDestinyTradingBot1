@@ -126,35 +126,28 @@ def send_rich_message(chat_id: int, text: str, image_bytes=None, reply_markup=No
 def main_keyboard():
     """Create main control panel keyboard."""
     kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
+    
+    # All buttons in one add() - auto-wraps to 2 per row
+    kb.row(
         types.InlineKeyboardButton("📈 Get Signals", callback_data="get_signal"),
-        types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4")
-    )
-    kb.add(
+        types.InlineKeyboardButton("🔎 Scan Top 4", callback_data="scan_top4"),
         types.InlineKeyboardButton("⚙️ Bot Status", callback_data="bot_status"),
-        types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending")
-    )
-    kb.add(
+        types.InlineKeyboardButton("🚀 Trending Pairs", callback_data="trending"),
         types.InlineKeyboardButton("📰 Market News", callback_data="market_news"),
-        types.InlineKeyboardButton("📃 My Challenge", callback_data="challenge_status")
-    )
-    kb.add(
+        types.InlineKeyboardButton("📃 My Challenge", callback_data="challenge_status"),
         types.InlineKeyboardButton("📷 Upload PnL", callback_data="pnl_upload"),
-        types.InlineKeyboardButton("📋 History", callback_data="history")
-    )
-    kb.add(
+        types.InlineKeyboardButton("📋 History", callback_data="history"),
         types.InlineKeyboardButton("🤖 AI Market Brief", callback_data="ask_ai"),
-        types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot")
-    )
-    kb.add(
+        types.InlineKeyboardButton("🔄 Refresh Bot", callback_data="refresh_bot"),
         types.InlineKeyboardButton("▶ Start Auto Scanner", callback_data="start_auto"),
-        types.InlineKeyboardButton("⏹ Stop Auto Scanner", callback_data="stop_auto")
-    )
-    kb.add(
+        types.InlineKeyboardButton("⏹ Stop Auto Scanner", callback_data="stop_auto"),
         types.InlineKeyboardButton("📣 Start Auto Briefs", callback_data="start_scheduler"),
         types.InlineKeyboardButton("⛔ Stop Auto Briefs", callback_data="stop_scheduler")
     )
+    
     return kb
+    
+
 
 # ----- Command Handlers -----
 @bot.message_handler(commands=["start", "menu"])
